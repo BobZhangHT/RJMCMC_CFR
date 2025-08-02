@@ -1,5 +1,7 @@
 /results
 /plots
+/.ipynb_checkpoints
+/__pycache__
 
 *.PDF
 *.ipynb
