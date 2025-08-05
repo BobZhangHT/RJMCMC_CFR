@@ -1,18 +1,16 @@
 # config.py
 
 import numpy as np
-from scipy.stats import gamma
+from scipy.stats import gamma, norm
+from scipy.special import logit
 
 # --- Simulation Parameters ---
 N_REPLICATIONS = 100  # Number of replicate datasets for each scenario
 T = 200               # Length of the time series
-SEED = 2025           # For reproducibility
+SEED = 2024           # For reproducibility
 
 # --- Data Generation Parameters ---
-# Defines a symmetric case wave: c(t) = 3000 - 5 * |100 - t|
 CASE_WAVE_FN = lambda t: 3000 - 5 * abs(100 - t)
-# Delay from case confirmation to death (Gamma distribution)
-# Matches mean=15.43, shape=2.03 from the report
 DELAY_DIST = gamma(a=2.03, scale=15.43 / 2.03)
 
 # --- RJMCMC Sampler Configuration ---
@@ -21,45 +19,50 @@ MCMC_BURN_IN = 5000
 K_MAX = 10  # Maximum number of change points allowed
 
 # --- Priors for RJMCMC ---
-# p(k) ~ Poisson(LAMBDA)
-PRIOR_K_LAMBDA = 1.0
-# p_j ~ Beta(alpha, beta)
-PRIOR_P_ALPHA = 1.0
-PRIOR_P_BETA = 1.0
+# # p(k) ~ Poisson(LAMBDA)
+PRIOR_K_LAMBDA = 0.001 #1.0
+
+# NEW GEOMETRIC PRIOR for k: p(k) = (1-p)^k * p
+# A higher p means a stronger penalty against complexity. p=0.5 is a good default.
+PRIOR_K_GEOMETRIC_P = 0.95
+
+# Prior for latent parameters: theta_s ~ Normal(MU, SIGMA^2)
+PRIOR_THETA_MU = -3.5  # A reasonable center for logit(p), e.g., logit(0.03) ~ -3.5
+PRIOR_THETA_SIGMA = 1.5
 
 # --- RJMCMC Proposal Distributions ---
-# u ~ Beta(2, 2) for birth/death moves
-PROPOSAL_U_DIST = "beta" # or "normal"
-# For logit-space proposals on p_j
-PROPOSAL_P_LOGIT_STD = 0.2
+# u ~ Normal(0, SIGMA_U^2) for birth/death moves
+PROPOSAL_U_SIGMA = 0.5
+# Proposal for updating theta: theta' ~ Normal(theta, SIGMA_THETA^2)
+PROPOSAL_THETA_SIGMA = 0.2
 
 # --- Simulation Scenarios ---
-# Each scenario is a dictionary defining the true fatality rate p(t)
-# Scenarios are adapted from the report to be explicitly piecewise-constant
+# Defined in terms of the latent, unconstrained parameter theta.
+# p_values are shown in comments for interpretability.
 SCENARIOS = {
-    # "Constant": {
-    #     "true_cps": [],
-    #     "true_p_values": [0.034]
-    # },
-    # "Step-wise Increasing": {
-    #     "true_cps": [80, 140],
-    #     "true_p_values": [0.02, 0.04, 0.06]
-    # },
-    # "Single Abrupt Increase": {
-    #     "true_cps": [100],
-    #     "true_p_values": [0.02, 0.05]
-    # },
-    # "Single Abrupt Decrease": {
-    #     "true_cps": [80],
-    #     "true_p_values": [0.05, 0.02]
-    # },
-    # "Increase-then-Decrease": {
-    #     "true_cps": [80, 120],
-    #     "true_p_values": [0.02, 0.06, 0.02]
-    # },
+    "Constant": {
+        "true_cps": [],
+        "true_theta_values": [logit(0.034)] # p ~ 0.034
+    },
+    "Step-wise Increasing": {
+        "true_cps": [80, 140],
+        "true_theta_values": [logit(0.02), logit(0.04), logit(0.06)]
+    },
+    "Single Abrupt Increase": {
+        "true_cps": [100],
+        "true_theta_values": [logit(0.02), logit(0.05)]
+    },
+    "Single Abrupt Decrease": {
+        "true_cps": [80],
+        "true_theta_values": [logit(0.05), logit(0.02)]
+    },
+    "Increase-then-Decrease": {
+        "true_cps": [80, 120],
+        "true_theta_values": [logit(0.02), logit(0.06), logit(0.02)]
+    },
     "Decrease-then-Increase": {
         "true_cps": [80, 120],
-        "true_p_values": [0.06, 0.02, 0.06]
+        "true_theta_values": [logit(0.06), logit(0.02), logit(0.06)]
     }
 }
 
