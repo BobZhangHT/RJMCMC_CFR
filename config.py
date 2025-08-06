@@ -5,9 +5,9 @@ from scipy.stats import gamma
 from scipy.special import logit
 
 # --- Simulation Parameters ---
-N_REPLICATIONS = 100  # Number of replicate datasets for each scenario
+N_REPLICATIONS = 10  # Number of replicate datasets for each scenario
 T = 200               # Length of the time series
-SEED = 2024           # For reproducibility
+SEED = 2025           # For reproducibility
 
 # --- Data Generation Parameters ---
 CASE_WAVE_FN = lambda t: 3000 - 5 * abs(100 - t)
@@ -35,7 +35,7 @@ PROPOSAL_THETA_SIGMA = 0.2
 # Proposal for moving a changepoint: tau' ~ Uniform(tau - M, tau + M)
 PROPOSAL_MOVE_WINDOW = 5
 
-# --- Simulation Scenarios ---
+# --- Simulation Scenarios (Piecewise-Constant) ---
 # Defined in terms of the latent, unconstrained parameter theta.
 SCENARIOS = {
     "Constant": {

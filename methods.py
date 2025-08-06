@@ -13,64 +13,47 @@ from config import (MCMC_ITER, MCMC_BURN_IN, K_MAX, DELAY_DIST, T,
 
 # ==============================================================================
 # ACCELERATED HELPER FUNCTIONS (NUMBA JIT)
-# These functions are compiled to machine code by Numba for maximum speed.
 # ==============================================================================
 
 @njit
 def _sigmoid(x):
-    """Numba-compatible sigmoid function to map latent parameters to probabilities."""
+    """Numba-compatible sigmoid function."""
     return 1.0 / (1.0 + np.exp(-x))
 
 @njit
 def _calculate_log_likelihood(deaths, cases, theta_t, delay_pmf):
-    """
-    Calculates the log-likelihood of the death series given the latent parameters.
-    This corresponds to Equation (3) in the manuscript.
-    """
-    # 1. Transform latent theta_t to case fatality rate p_t
+    """Calculates the log-likelihood of the death series."""
     p_t = _sigmoid(theta_t)
-    
-    # 2. Calculate the expected number of deaths (mu_t) via convolution
-    # This corresponds to Equation (2) in the manuscript.
     signal = cases * p_t
     expected_deaths = np.zeros(T)
     for i in range(T):
         for j in range(i + 1):
             if j < len(delay_pmf):
                 expected_deaths[i] += signal[i - j] * delay_pmf[j]
-
-    # 3. Calculate the Poisson log-likelihood
     log_lik = 0.0
     for t in range(T):
-        mu = max(1e-9, expected_deaths[t]) # Add epsilon to avoid log(0)
-        # log(Poisson(d | mu)) = d*log(mu) - mu - log(d!)
-        # The log(d!) term is a constant for the observed data, so it can be ignored
-        # as it cancels out in all acceptance ratio calculations.
+        mu = max(1e-9, expected_deaths[t])
         log_lik += deaths[t] * np.log(mu) - mu
-    
     return log_lik
 
 @njit
 def _get_theta_t_from_state(k, taus, theta_values):
-    """Constructs the full theta(t) time series from a given state (k, taus, theta_values)."""
+    """Constructs the full theta(t) time series from a given state."""
     theta_t = np.zeros(T)
-    # Define segment boundaries: [0, tau_1, tau_2, ..., T]
     boundaries = np.array([0] + list(taus) + [T])
     for i in range(k + 1):
-        # Assign the constant theta value to each segment
         theta_t[boundaries[i]:boundaries[i+1]] = theta_values[i]
     return theta_t
 
 @njit
 def _log_pdf_normal(x, mu, sigma):
-    """Numba-compatible log PDF for a Normal distribution for prior calculations."""
+    """Numba-compatible log PDF for a Normal distribution."""
     return -0.5 * np.log(2 * np.pi * sigma**2) - ((x - mu)**2) / (2 * sigma**2)
 
 @njit
 def _log_pmf_geometric(k, p):
-    """Numba-compatible log PMF for a Geometric distribution: p(k) = (1-p)^k * p."""
-    if k < 0 or p <= 0 or p > 1:
-        return -np.inf
+    """Numba-compatible log PMF for a Geometric distribution."""
+    if k < 0 or p <= 0 or p > 1: return -np.inf
     return k * np.log(1.0 - p) + np.log(p)
 
 # ==============================================================================
@@ -79,122 +62,83 @@ def _log_pmf_geometric(k, p):
 
 # @njit
 def _rjmcmc_sampler_numba(deaths, cases, delay_pmf):
-    """
-    The core RJMCMC sampler loop for the latent parameter model, optimized with Numba.
-    This function implements the algorithm described in Section 3.2 of the manuscript.
-    """
-    # --- MCMC State Initialization ---
+    """The core RJMCMC sampler loop, optimized with Numba."""
     k = 0
     taus = np.array([], dtype=np.int64)
     theta_values = np.array([np.random.normal(PRIOR_THETA_MU, PRIOR_THETA_SIGMA)])
     
-    # Storage for posterior samples (pre-allocate for speed)
     k_samples = np.zeros(MCMC_ITER, dtype=np.int64)
     taus_samples = np.full((MCMC_ITER, K_MAX), -1, dtype=np.int64)
     theta_samples = np.full((MCMC_ITER, K_MAX + 1), np.nan, dtype=np.float64)
 
-    # --- MCMC Loop ---
     for iter_idx in range(MCMC_ITER + MCMC_BURN_IN):
-        # --- Calculate current state likelihood and prior ---
         theta_t_current = _get_theta_t_from_state(k, taus, theta_values)
         log_lik_current = _calculate_log_likelihood(deaths, cases, theta_t_current, delay_pmf)
-        
         log_prior_k_current = _log_pmf_geometric(k, PRIOR_K_GEOMETRIC_P)
         log_prior_theta_current = 0.0
         for val in theta_values:
             log_prior_theta_current += _log_pdf_normal(val, PRIOR_THETA_MU, PRIOR_THETA_SIGMA)
 
-        # --- Select and Perform Move ---
         u_move = np.random.rand()
-        if k == 0:
-            move_type = "birth"
-        elif k == K_MAX:
-            move_type = "death"
+        if k == 0: move_type = "birth"
+        elif k == K_MAX: move_type = "death"
         else:
-            if u_move < 0.25:
-                move_type = "birth"
-            elif u_move < 0.50:
-                move_type = "death"
-            elif u_move < 0.75:
-                move_type = "move"
-            else:
-                move_type = "update"
+            if u_move < 0.25: move_type = "birth"
+            elif u_move < 0.50: move_type = "death"
+            elif u_move < 0.75: move_type = "move"
+            else: move_type = "update"
 
-        # --- 1. BIRTH MOVE (Section 3.2.1) ---
         if move_type == "birth":
             possible_cps = np.array([i for i in range(1, T) if i not in taus])
             tau_star = np.random.choice(possible_cps)
             seg_idx = np.searchsorted(taus, tau_star)
-            
             theta_j = theta_values[seg_idx]
             u_aux = np.random.normal(0, PROPOSAL_U_SIGMA)
             theta1_star, theta2_star = theta_j - u_aux, theta_j + u_aux
-
             k_new, taus_new = k + 1, np.sort(np.append(taus, tau_star))
             theta_values_new = np.concatenate((theta_values[:seg_idx], np.array([theta1_star, theta2_star]), theta_values[seg_idx+1:]))
-            
             theta_t_new = _get_theta_t_from_state(k_new, taus_new, theta_values_new)
             log_lik_new = _calculate_log_likelihood(deaths, cases, theta_t_new, delay_pmf)
-            
             log_prior_k_new = _log_pmf_geometric(k_new, PRIOR_K_GEOMETRIC_P)
             log_prior_theta_new = 0.0
             for val in theta_values_new:
                 log_prior_theta_new += _log_pdf_normal(val, PRIOR_THETA_MU, PRIOR_THETA_SIGMA)
-            
-            # Acceptance probability based on the simplified formula from the manuscript's appendix
-            # A = (L'/L) * (p(k')/p(k) * p(theta')/p(theta)) * (d/b * 1/g(u))
             log_lik_ratio = log_lik_new - log_lik_current
             log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
-            # Assuming b_k = d_{k+1}, the d/b term is 1.
             log_proposal_ratio = -_log_pdf_normal(u_aux, 0, PROPOSAL_U_SIGMA)
-            
             log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
-
             if np.log(np.random.rand()) < log_alpha:
                 k, taus, theta_values = k_new, taus_new, theta_values_new
 
-        # --- 2. DEATH MOVE (Section 3.2.2) ---
         elif move_type == "death":
             idx_to_remove = np.random.randint(0, k)
             theta1, theta2 = theta_values[idx_to_remove], theta_values[idx_to_remove+1]
             theta_j_star = (theta1 + theta2) / 2.0
             u_aux = (theta2 - theta1) / 2.0
-
             k_new, taus_new = k - 1, np.delete(taus, idx_to_remove)
             theta_values_new = np.concatenate((theta_values[:idx_to_remove], np.array([theta_j_star]), theta_values[idx_to_remove+2:]))
-
             theta_t_new = _get_theta_t_from_state(k_new, taus_new, theta_values_new)
             log_lik_new = _calculate_log_likelihood(deaths, cases, theta_t_new, delay_pmf)
-            
             log_prior_k_new = _log_pmf_geometric(k_new, PRIOR_K_GEOMETRIC_P)
             log_prior_theta_new = 0.0
             for val in theta_values_new:
                 log_prior_theta_new += _log_pdf_normal(val, PRIOR_THETA_MU, PRIOR_THETA_SIGMA)
-
-            # The acceptance ratio for death is the inverse of the one for birth
             log_lik_ratio = log_lik_new - log_lik_current
             log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
             log_proposal_ratio = _log_pdf_normal(u_aux, 0, PROPOSAL_U_SIGMA)
-            
             log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
-
             if np.log(np.random.rand()) < log_alpha:
                 k, taus, theta_values = k_new, taus_new, theta_values_new
 
-        # --- 3. MOVE MOVE (Section 3.2.3) ---
         elif move_type == "move" and k > 0:
             idx_to_move = np.random.randint(0, k)
             tau_current = taus[idx_to_move]
-            
             lower_prop = max(1, tau_current - PROPOSAL_MOVE_WINDOW)
             upper_prop = min(T - 1, tau_current + PROPOSAL_MOVE_WINDOW)
-            
             if lower_prop < upper_prop:
                 tau_new = np.random.randint(lower_prop, upper_prop + 1)
-                
                 lower_bound = taus[idx_to_move-1] + 1 if idx_to_move > 0 else 1
                 upper_bound = taus[idx_to_move+1] - 1 if idx_to_move < k - 1 else T - 1
-                
                 if lower_bound <= tau_new <= upper_bound and tau_new != tau_current:
                     taus_new = np.copy(taus)
                     taus_new[idx_to_move] = tau_new
@@ -203,8 +147,7 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf):
                     log_alpha = log_lik_new - log_lik_current
                     if np.log(np.random.rand()) < log_alpha:
                         taus = np.sort(taus_new)
-                        
-        # --- 4. UPDATE MOVE (Section 3.2.4) ---
+
         elif move_type == "update":
             for j in range(k + 1):
                 theta_current = theta_values[j]
@@ -231,8 +174,19 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf):
 def run_rjmcmc(data):
     """Main wrapper for the RJMCMC sampler."""
     delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T + 1)))
-    k_samples, taus_samples, _ = _rjmcmc_sampler_numba(data["deaths"], data["cases"], delay_pmf)
-    if len(k_samples) == 0: return {"k": 0, "taus": []}
+    k_samples, taus_samples, theta_samples = _rjmcmc_sampler_numba(data["deaths"], data["cases"], delay_pmf)
+    
+    # --- Post-process to get final estimates and full posterior samples ---
+    p_t_samples = np.zeros((MCMC_ITER, T))
+    for i in range(MCMC_ITER):
+        k = k_samples[i]
+        taus = taus_samples[i, :k]
+        thetas = theta_samples[i, :(k + 1)]
+        theta_t_sample = _get_theta_t_from_state(k, taus, thetas)
+        p_t_samples[i, :] = _sigmoid(theta_t_sample)
+
+    p_t_hat = np.mean(p_t_samples, axis=0)
+    
     est_k = int(Counter(k_samples).most_common(1)[0][0])
     est_taus = []
     if est_k > 0:
@@ -240,14 +194,25 @@ def run_rjmcmc(data):
         tau_tuples = [tuple(row) for row in relevant_taus]
         if tau_tuples:
             est_taus = sorted(list(Counter(tau_tuples).most_common(1)[0][0]))
-    return {"k": est_k, "taus": est_taus}
+            
+    return {"k_samples": k_samples, "taus_samples": taus_samples, "p_t_samples": p_t_samples,
+            "k_est": est_k, "taus_est": est_taus, "p_t_hat": p_t_hat}
 
 def run_pelt(data):
     """Wrapper for PELT method."""
     signal = data["deaths"] / (data["cases"] + 1e-6)
     algo = rpt.Pelt(model="rbf").fit(signal)
     result = algo.predict(pen=np.log(T) * 2)
-    return {"k": len(result)-1, "taus": result[:-1]}
+    
+    # Reconstruct p_t_hat
+    p_t_hat = np.zeros(T)
+    boundaries = [0] + result
+    for i in range(len(boundaries) - 1):
+        start, end = boundaries[i], boundaries[i]
+        if end > start:
+            p_t_hat[start:end] = np.mean(signal[start:end])
+
+    return {"k_est": len(result)-1, "taus_est": result[:-1], "p_t_hat": p_t_hat}
 
 def run_binseg(data):
     """Wrapper for Binary Segmentation method."""
@@ -263,4 +228,13 @@ def run_binseg(data):
             min_cost = cost
             best_k = k_candidate
     result = algo.predict(n_bkps=best_k)
-    return {"k": best_k, "taus": result[:-1]}
+    
+    # Reconstruct p_t_hat
+    p_t_hat = np.zeros(T)
+    boundaries = [0] + result
+    for i in range(len(boundaries) - 1):
+        start, end = boundaries[i], boundaries[i+1]
+        if end > start:
+            p_t_hat[start:end] = np.mean(signal[start:end])
+
+    return {"k_est": best_k, "taus_est": result[:-1], "p_t_hat": p_t_hat}

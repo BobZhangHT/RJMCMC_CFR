@@ -31,17 +31,14 @@ def generate_dataset(scenario_config, rep_idx):
     # 3. Transform the latent process to the true case fatality rate p(t)
     p_t = expit(theta_t) # p_t = sigmoid(theta_t)
     
-    # 4. Pre-calculate the delay PMF
+    # 4. Pre-calculate the delay PMF using the difference of the CDF
     delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T + 1)))
 
     # 5. Calculate expected deaths via convolution
-    # The term p(t-s)c(t-s)f(s+1) in the manuscript is a convolution.
-    # We convolve the product of cases and p_t with the delay distribution.
     signal = cases * p_t
     expected_deaths = np.convolve(signal, delay_pmf)[:T]
 
     # 6. Generate observed deaths from a Poisson distribution
-    # Ensure the mean of the Poisson is non-negative
     expected_deaths[expected_deaths < 0] = 0
     deaths = poisson.rvs(expected_deaths)
 
