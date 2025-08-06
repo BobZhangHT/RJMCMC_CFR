@@ -1,7 +1,7 @@
 # config.py
 
 import numpy as np
-from scipy.stats import gamma, norm
+from scipy.stats import gamma
 from scipy.special import logit
 
 # --- Simulation Parameters ---
@@ -18,13 +18,10 @@ MCMC_ITER = 20000
 MCMC_BURN_IN = 5000
 K_MAX = 10  # Maximum number of change points allowed
 
-# --- Priors for RJMCMC ---
-# # p(k) ~ Poisson(LAMBDA)
-PRIOR_K_LAMBDA = 0.001 #1.0
-
-# NEW GEOMETRIC PRIOR for k: p(k) = (1-p)^k * p
-# A higher p means a stronger penalty against complexity. p=0.5 is a good default.
-PRIOR_K_GEOMETRIC_P = 0.95
+# --- Priors for RJMCMC (as per the manuscript) ---
+# Prior for k: Geometric distribution p(k) = (1-p)^k * p.
+# A higher p encourages sparsity (fewer changepoints).
+PRIOR_K_GEOMETRIC_P = 0.5
 
 # Prior for latent parameters: theta_s ~ Normal(MU, SIGMA^2)
 PRIOR_THETA_MU = -3.5  # A reasonable center for logit(p), e.g., logit(0.03) ~ -3.5
@@ -35,14 +32,15 @@ PRIOR_THETA_SIGMA = 1.5
 PROPOSAL_U_SIGMA = 0.5
 # Proposal for updating theta: theta' ~ Normal(theta, SIGMA_THETA^2)
 PROPOSAL_THETA_SIGMA = 0.2
+# Proposal for moving a changepoint: tau' ~ Uniform(tau - M, tau + M)
+PROPOSAL_MOVE_WINDOW = 5
 
 # --- Simulation Scenarios ---
 # Defined in terms of the latent, unconstrained parameter theta.
-# p_values are shown in comments for interpretability.
 SCENARIOS = {
     "Constant": {
         "true_cps": [],
-        "true_theta_values": [logit(0.034)] # p ~ 0.034
+        "true_theta_values": [logit(0.034)]
     },
     "Step-wise Increasing": {
         "true_cps": [80, 140],

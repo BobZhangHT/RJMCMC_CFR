@@ -32,9 +32,7 @@ def generate_dataset(scenario_config, rep_idx):
     p_t = expit(theta_t) # p_t = sigmoid(theta_t)
     
     # 4. Pre-calculate the delay PMF
-    s = np.arange(0, T)
-    delay_pmf = DELAY_DIST.pdf(s)
-    delay_pmf /= np.sum(delay_pmf) # Normalize to ensure it's a valid PMF
+    delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T + 1)))
 
     # 5. Calculate expected deaths via convolution
     # The term p(t-s)c(t-s)f(s+1) in the manuscript is a convolution.
