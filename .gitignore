@@ -1,4 +1,6 @@
-/results
+/results_main
+/results_sensitivity
+/results_cache
 /plots
 /.ipynb_checkpoints
 /__pycache__
