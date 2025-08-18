@@ -37,7 +37,7 @@ DELAY_DIST = gamma(a=2.03, scale=15.43 / 2.03)
 # ==============================================================================
 MCMC_ITER = 20000
 MCMC_BURN_IN = 5000
-K_MAX = 10  # Maximum number of change points allowed in the model
+K_MAX = 20  # Maximum number of change points allowed in the model
 
 # ==============================================================================
 # --- Priors for RJMCMC (as per the manuscript) ---
@@ -59,7 +59,7 @@ PRIOR_THETA_SIGMA = 0.5
 # Standard deviation for the auxiliary variable u in birth/death moves
 PROPOSAL_U_SIGMA = 0.5
 # Standard deviation for the random walk proposal when updating theta values
-PROPOSAL_THETA_SIGMA = 0.2
+PROPOSAL_THETA_SIGMA = 0.5
 # Symmetric window size (M) for the "move" move proposal
 PROPOSAL_MOVE_WINDOW = 5
 

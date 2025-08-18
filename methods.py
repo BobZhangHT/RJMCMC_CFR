@@ -204,7 +204,6 @@ def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA):
     """Main wrapper for the RJMCMC sampler."""
     T = data["cases"].shape[0]
     delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T + 1)))
-    delay_pmf /= np.sum(delay_pmf)
     
     k_samples, taus_samples, theta_samples = _rjmcmc_sampler_numba(
         data["deaths"], data["cases"], delay_pmf, T,
