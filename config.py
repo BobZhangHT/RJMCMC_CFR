@@ -21,55 +21,56 @@ SENSITIVITY_REPLICATIONS = 5
 # Length of the time series for each simulated dataset
 T = 200
 # Global random seed for reproducibility
-SEED = 2024
+SEED = 2025
 
 # ==============================================================================
 # --- Data Generation Parameters ---
 # ==============================================================================
 # Defines a symmetric case wave function for generating daily case counts
 CASE_WAVE_FN = lambda t: 3000 - 5 * abs(100 - t)
-# Defines the delay distribution from case confirmation to death using a Gamma distribution
-# Parameters are based on the manuscript's specifications.
+# Defines the default delay distribution from case confirmation to death
+# This is also the "perfectly matched" scenario.
 DELAY_DIST = gamma(a=2.03, scale=15.43 / 2.03)
 
 # ==============================================================================
 # --- RJMCMC Sampler Configuration ---
 # ==============================================================================
+# MCMC iterations and burn-in period
 MCMC_ITER = 20000
 MCMC_BURN_IN = 5000
-K_MAX = 20  # Maximum number of change points allowed in the model
+# Maximum number of changepoints allowed in the model
+K_MAX = 10
 
-# ==============================================================================
-# --- Priors for RJMCMC (as per the manuscript) ---
-# ==============================================================================
-# These are the default values. The main simulation will use the optimal
-# values determined by the sensitivity analysis.
-PRIOR_THETA_MU = -3.5
-
-# Prior for k: Geometric distribution p(k) = (1-p)^k * p.
-# A higher p encourages sparsity (fewer changepoints).
+# Default priors - will be overridden by sensitivity analysis or optimal values
 PRIOR_K_GEOMETRIC_P = 0.9
+PRIOR_THETA_MU = -3.5
+PRIOR_THETA_SIGMA = 1.0
 
-# Prior for latent parameters: theta_s ~ Normal(MU, SIGMA^2)
-PRIOR_THETA_SIGMA = 0.5
-
-# ==============================================================================
-# --- RJMCMC Proposal Distributions ---
-# ==============================================================================
-# Standard deviation for the auxiliary variable u in birth/death moves
+# Proposal distribution variances for the MCMC updates
 PROPOSAL_U_SIGMA = 0.5
-# Standard deviation for the random walk proposal when updating theta values
 PROPOSAL_THETA_SIGMA = 0.5
-# Symmetric window size (M) for the "move" move proposal
 PROPOSAL_MOVE_WINDOW = 5
 
 # ==============================================================================
-# --- Simulation Scenarios (Piecewise-Constant) ---
+# --- Benchmark Method Configuration ---
 # ==============================================================================
-# Scenarios are defined in terms of the latent, unconstrained parameter theta.
+# Cache directory for the computationally expensive rtaCFR signal estimation
+SIGNAL_CACHE_DIR = "rtacfr_cache"
+
+# ==============================================================================
+# --- Directory Configuration ---
+# ==============================================================================
+# Directories for storing simulation results and output plots
+MAIN_RESULTS_DIR = "results/main"
+SENSITIVITY_RESULTS_DIR = "results/sensitivity"
+PLOTS_DIR = "plots"
+
+# ==============================================================================
+# --- Simulation Scenarios ---
+# ==============================================================================
+# Defines the different ground truth scenarios for the simulation study
 SCENARIOS = {
-    "Constant": {"true_cps": [], "true_theta_values": [logit(0.034)]},
-    "Stepwise Increasing": {"true_cps": [80, 140], "true_theta_values": [logit(0.02), logit(0.04), logit(0.06)]},
+    "No Change": {"true_cps": [], "true_theta_values": [logit(0.04)]},
     "Single Abrupt Increase": {"true_cps": [100], "true_theta_values": [logit(0.02), logit(0.05)]},
     "Single Abrupt Decrease": {"true_cps": [80], "true_theta_values": [logit(0.05), logit(0.02)]},
     "Increase then Decrease": {"true_cps": [80, 120], "true_theta_values": [logit(0.02), logit(0.06), logit(0.04)]},
@@ -79,19 +80,22 @@ SCENARIOS = {
 # ==============================================================================
 # --- Sensitivity Analysis Configuration ---
 # ==============================================================================
-# Finer grid of hyperparameter values to test in the sensitivity analysis
-SENSITIVITY_GRID = {
+# Grid for prior hyperparameters
+SENSITIVITY_GRID_PRIORS = {
     'PRIOR_K_GEOMETRIC_P': [0.1, 0.3, 0.5, 0.7, 0.9],
     'PRIOR_THETA_SIGMA': [0.5, 1.0, 1.5, 2.0, 2.5]
 }
-# A representative scenario to use for detailed sensitivity plots
-SENSITIVITY_SCENARIO_FOR_PLOT = "Increase then Decrease"
 
-# ==============================================================================
-# --- Output Directories ---
-# ==============================================================================
-DATA_DIR = "data"
-SENSITIVITY_RESULTS_DIR = "results_sensitivity"
-MAIN_RESULTS_DIR = "results_main"
-SIGNAL_CACHE_DIR = "results_cache"
-PLOTS_DIR = "plots"
+# Grid for delay distribution misspecification
+# The mean delay is shifted by +/- 3 days for under/overestimation
+DELAY_DIST_SENSITIVITY = {
+    "Underestimated Delay (Mean=12.43)": gamma(a=2.03, scale=12.43 / 2.03),
+    "Perfectly Matched Delay (Mean=15.43)": gamma(a=2.03, scale=15.43 / 2.03),
+    "Overestimated Delay (Mean=18.43)": gamma(a=2.03, scale=18.43 / 2.03)
+}
+
+# To be filled by the analysis script after sensitivity run
+OPTIMAL_PARAMS = {
+    'PRIOR_K_GEOMETRIC_P': None,
+    'PRIOR_THETA_SIGMA': None
+}

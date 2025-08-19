@@ -13,7 +13,7 @@ from scipy.special import expit
 from config import T, CASE_WAVE_FN, DELAY_DIST, SEED
 
 
-def generate_dataset(scenario_config, rep_idx):
+def generate_dataset(scenario_config, rep_idx, delay_dist_override=None):
     """
     Generates a single dataset (cases and deaths) for a given scenario.
 
@@ -27,6 +27,9 @@ def generate_dataset(scenario_config, rep_idx):
                                 latent parameter values.
         rep_idx (int): The replication index for the simulation run, used to
                        ensure a unique and reproducible random seed.
+        delay_dist_override (scipy.stats.rv_continuous, optional):
+                               If provided, this delay distribution will be used
+                               instead of the default from config.py. Defaults to None.
 
     Returns:
         dict: A dictionary containing the simulated time series for 'cases',
@@ -53,15 +56,17 @@ def generate_dataset(scenario_config, rep_idx):
     # 3. Transform the latent process to the true case fatality rate p(t)
     p_t = expit(theta_t)  # p_t = sigmoid(theta_t)
 
-    # 4. Pre-calculate the delay PMF using the difference of the CDF
-    delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T + 1)))
+    # 4. Determine which delay distribution to use for this run
+    active_delay_dist = delay_dist_override if delay_dist_override is not None else DELAY_DIST
+    
+    # 5. Pre-calculate the delay PMF using the difference of the CDF
+    delay_pmf = np.diff(active_delay_dist.cdf(np.arange(T + 1)))
 
-    # 5. Calculate expected deaths via convolution
+    # 6. Calculate expected deaths via convolution
     signal = cases * p_t
     expected_deaths = np.convolve(signal, delay_pmf)[:T]
 
-    # 6. Generate observed deaths from a Poisson distribution
-    expected_deaths[expected_deaths < 0] = 0
+    # 7. Generate observed deaths from a Poisson distribution
     deaths = poisson.rvs(expected_deaths)
 
     return {

@@ -267,7 +267,6 @@ def _run_rtacfr_fusedlasso_internal(data):
         return np.zeros(N)
     return best_p_hat
 
-
 def get_rtacfr_signal(data, scenario_name, rep_idx):
     """Calculates the fused lasso signal, using a cache to avoid re-computation."""
     cache_file = os.path.join(SIGNAL_CACHE_DIR, f"signal_scen={scenario_name.replace(' ', '-')}_rep={rep_idx}.npz")
@@ -277,6 +276,16 @@ def get_rtacfr_signal(data, scenario_name, rep_idx):
     np.savez(cache_file, signal=p_hat)
     return p_hat
 
+def run_rtacfr(data, scenario_name, rep_idx):
+    """
+    Wrapper for the pure rtaCFR-fusedlasso method as a benchmark.
+    This provides the raw smoothed signal for plotting.
+    """
+    signal = get_rtacfr_signal(data, scenario_name, rep_idx)
+    diffs = np.diff(signal)
+    taus_est = np.where(np.abs(diffs) > 1e-6)[0] + 1
+    k_est = len(taus_est)
+    return {"k_est": k_est, "taus_est": list(taus_est), "p_t_hat": signal}
 
 def run_pelt(data, scenario_name, rep_idx):
     """Wrapper for PELT method applied to the cached rtaCFR signal."""
@@ -314,12 +323,3 @@ def run_binseg(data, scenario_name, rep_idx):
         if end > start:
             p_t_hat[start:end] = np.mean(signal[start:end])
     return {"k_est": best_k, "taus_est": result[:-1], "p_t_hat": p_t_hat}
-
-
-def run_rtacfr(data, scenario_name, rep_idx):
-    """Wrapper for the pure rtaCFR-fusedlasso method as a benchmark."""
-    p_hat = get_rtacfr_signal(data, scenario_name, rep_idx)
-    diffs = np.diff(p_hat)
-    taus_est = np.where(np.abs(diffs) > 1e-6)[0] + 1
-    k_est = len(taus_est)
-    return {"k_est": k_est, "taus_est": list(taus_est), "p_t_hat": p_hat}
