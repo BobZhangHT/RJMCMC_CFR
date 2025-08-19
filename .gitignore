@@ -1,6 +1,7 @@
-/results_main
-/results_sensitivity
-/results_cache
+/results
+/results/sensitivity
+/results/main
+/rtacfr_cache
 /plots
 /.ipynb_checkpoints
 /__pycache__
