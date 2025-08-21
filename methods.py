@@ -201,22 +201,31 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_s
 # ==============================================================================
 
 def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA):
-    """Main wrapper for the RJMCMC sampler."""
-    T = data["cases"].shape[0]
-    delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T + 1)))
+    """
+    Main wrapper for the RJMCMC sampler. This version calculates summary
+    statistics and discards the raw samples to save memory.
+    """
+    T_data = data["cases"].shape[0]
+    delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T_data + 1)))
     
     k_samples, taus_samples, theta_samples = _rjmcmc_sampler_numba(
-        data["deaths"], data["cases"], delay_pmf, T,
+        data["deaths"], data["cases"], delay_pmf, T_data,
         p_geom, PRIOR_THETA_MU, theta_sigma,
         PROPOSAL_U_SIGMA, PROPOSAL_THETA_SIGMA, PROPOSAL_MOVE_WINDOW
     )
     
-    p_t_samples = np.zeros((MCMC_ITER, T))
+    # --- Post-processing ---
+    # Calculate p(t) for each sample
+    p_t_samples = np.zeros((MCMC_ITER, T_data))
     for i in range(MCMC_ITER):
         k, taus, thetas = k_samples[i], taus_samples[i, :k_samples[i]], theta_samples[i, :(k_samples[i] + 1)]
-        theta_t_sample = _get_theta_t_from_state(k, taus, thetas, T)
+        theta_t_sample = _get_theta_t_from_state(k, taus, thetas, T_data)
         p_t_samples[i, :] = _sigmoid(theta_t_sample)
-    p_t_hat = np.mean(p_t_samples, axis=0)
+    
+    # Calculate summary statistics
+    p_t_mean = np.mean(p_t_samples, axis=0)
+    p_t_lower_ci = np.percentile(p_t_samples, 2.5, axis=0)
+    p_t_upper_ci = np.percentile(p_t_samples, 97.5, axis=0)
     
     est_k = int(Counter(k_samples).most_common(1)[0][0])
     est_taus = []
@@ -226,8 +235,15 @@ def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA):
         if tau_tuples:
             est_taus = sorted(list(Counter(tau_tuples).most_common(1)[0][0]))
             
-    return {"k_samples": k_samples, "taus_samples": taus_samples, "p_t_samples": p_t_samples,
-            "k_est": est_k, "taus_est": est_taus, "p_t_hat": p_t_hat}
+    # Return ONLY the summarized results
+    return {
+        "k_est": est_k, 
+        "taus_est": est_taus, 
+        "p_t_hat": p_t_mean, # Use p_t_hat for consistency with benchmarks
+        "p_t_lower_ci": p_t_lower_ci,
+        "p_t_upper_ci": p_t_upper_ci
+    }
+
 
 
 def _run_rtacfr_fusedlasso_internal(data):

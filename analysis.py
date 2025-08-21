@@ -16,19 +16,34 @@ from tqdm import tqdm
 import pickle
 from scipy.spatial.distance import directed_hausdorff
 from collections import Counter
+from scipy.special import logit
 
 from config import (SENSITIVITY_RESULTS_DIR, MAIN_RESULTS_DIR, PLOTS_DIR,
                     SCENARIOS, T, SENSITIVITY_GRID_PRIORS, DELAY_DIST_SENSITIVITY,
-                    SIGNAL_CACHE_DIR)
+                    SIGNAL_CACHE_DIR, K_MAX)
 
 # ==============================================================================
 # EVALUATION METRICS
 # ==============================================================================
 
+def _logit_safe(p, eps=1e-9):
+    """Safely applies logit transformation by clamping values near 0 and 1."""
+    p_safe = np.clip(p, eps, 1 - eps)
+    return logit(p_safe)
+
 def calculate_mae(p_t_true, p_t_hat):
-    """Calculates the Mean Absolute Error, ignoring NaNs."""
-    if p_t_hat is None: return np.nan
-    return np.nanmean(np.abs(p_t_true - p_t_hat))
+    """
+    Calculates the Mean Absolute Error on the LOGIT-TRANSFORMED CFR.
+    This amplifies differences near 0 and 1.
+    """
+    if p_t_hat is None or p_t_true is None:
+        return np.nan
+    
+    # Apply safe logit transformation to both true and estimated values
+    true_logit = _logit_safe(p_t_true)
+    hat_logit = _logit_safe(p_t_hat)
+    
+    return np.nanmean(np.abs(true_logit - hat_logit))
 
 def calculate_accuracy(k_true, k_hat):
     """Calculates the accuracy of the number of changepoints."""
@@ -129,8 +144,56 @@ def generate_main_results_table(df_main):
         mae_mean=('mae', 'mean'),
         mae_std=('mae', 'std')
     ).reset_index()
+
+    pivot = summary.pivot(index='scenario', columns='method')
+    scenario_order = list(SCENARIOS.keys())
+    method_order = ['RJMCMC', 'Pelt', 'BinSeg']
+    
+    pivot = pivot.reindex(scenario_order)
+    pivot = pivot.reindex(columns=[(level1, level2) for level1 in pivot.columns.levels[0] for level2 in method_order])
+
+    latex_string = "\\begin{table}[ht]\n"
+    latex_string += "\\centering\n"
+    latex_string += "\\caption{Performance summary under optimal priors. Mean (std) reported for HD and Logit MAE.}\n"
+    latex_string += "\\label{tab:main_results}\n"
+    latex_string += "\\resizebox{\\textwidth}{!}{\n"
+    latex_string += "\\begin{tabular}{l" + "ccc" * len(method_order) + "}\n"
+    latex_string += "\\toprule\n"
+    
+    latex_string += "Scenario & "
+    for method in method_order:
+        method_label = "Proposed (RJMCMC)" if method == "RJMCMC" else method
+        latex_string += f"\\multicolumn{{3}}{{c}}{{{method_label}}} & "
+    latex_string = latex_string.rstrip(' &') + " \\\\\n"
+    latex_string += "\\cmidrule(lr){2-4} \\cmidrule(lr){5-7} \\cmidrule(lr){8-10}\n"
+    
+    latex_string += " & " + "Accuracy & Hausdorff (HD) & Logit MAE & " * len(method_order)
+    latex_string = latex_string.rstrip(' &') + " \\\\\n"
+    latex_string += "\\midrule\n"
+    
+    for scenario in scenario_order:
+        latex_string += f"{scenario} & "
+        for method in method_order:
+            acc = pivot.loc[scenario, ('accuracy_mean', method)]
+            hd_mean = pivot.loc[scenario, ('hausdorff_mean', method)]
+            hd_std = pivot.loc[scenario, ('hausdorff_std', method)]
+            mae_mean = pivot.loc[scenario, ('mae_mean', method)]
+            mae_std = pivot.loc[scenario, ('mae_std', method)]
+            
+            hd_str = "NA" if np.isnan(hd_mean) else f"{hd_mean:.2f} ({hd_std:.2f})"
+            mae_str = f"{mae_mean:.2f} ({mae_std:.2f})"
+            
+            latex_string += f"{acc:.2f} & {hd_str} & {mae_str} & "
+        latex_string = latex_string.rstrip(' &') + " \\\\\n"
+        
+    latex_string += "\\bottomrule\n"
+    latex_string += "\\end{tabular}}\n"
+    latex_string += "\\end{table}"
+
     save_path = os.path.join(PLOTS_DIR, "main_results_table.tex")
-    # ... (file writing logic is unchanged)
+    with open(save_path, 'w') as f:
+        f.write(latex_string)
+    
     print(f"Main results LaTeX table saved at: {save_path}")
 
 # ==============================================================================
@@ -138,13 +201,14 @@ def generate_main_results_table(df_main):
 # ==============================================================================
 
 def generate_publication_figure(results_dir, optimal_params):
-    """Generates the 5x3 publication figure comparing RJMCMC and the original rtaCFR."""
+    """Generates the 5x3 publication figure by aggregating summarized results."""
     fig, axes = plt.subplots(len(SCENARIOS), 3, figsize=(18, 22), gridspec_kw={'width_ratios': [1, 1, 2]})
     scenario_order = list(SCENARIOS.keys())
 
     for i, scenario_name in enumerate(scenario_order):
-        all_k_samples, all_tau_samples = [], []
-        rjmcmc_p_t_runs, rtacfr_p_t_runs = [], []
+        all_k_est, all_taus_est = [], []
+        all_p_t_means, all_p_t_lowers, all_p_t_uppers = [], [], []
+        rtacfr_p_t_runs = []
         true_p_t, true_cps = None, None
 
         fnames = [f for f in os.listdir(results_dir) if scenario_name.replace(' ', '_') in f]
@@ -156,16 +220,13 @@ def generate_publication_figure(results_dir, optimal_params):
                     res = pickle.load(f)
                 
                 rjmcmc_res = res.get('rjmcmc', {})
-                if 'k_samples' in rjmcmc_res:
-                    all_k_samples.extend(rjmcmc_res['k_samples'])
-                    for k, taus in zip(rjmcmc_res['k_samples'], rjmcmc_res['taus_samples']):
-                        if k > 0:
-                            all_tau_samples.extend(taus[:k])
-                if 'p_t_samples' in rjmcmc_res:
-                    rjmcmc_p_t_runs.append(rjmcmc_res['p_t_samples'])
+                all_k_est.append(rjmcmc_res.get('k_est', -1))
+                all_taus_est.extend(rjmcmc_res.get('taus_est', []))
+                all_p_t_means.append(rjmcmc_res.get('p_t_hat', np.full(T, np.nan)))
+                all_p_t_lowers.append(rjmcmc_res.get('p_t_lower_ci', np.full(T, np.nan)))
+                all_p_t_uppers.append(rjmcmc_res.get('p_t_upper_ci', np.full(T, np.nan)))
                 
-                # Load rtaCFR signal directly from cache
-                match = re.search(r'_rep(\d+)_', fname)
+                match = re.search(r'_rep(\d+)', fname)
                 if match:
                     rep_idx = int(match.group(1))
                     scen_fname = scenario_name.replace(" ", "-")
@@ -180,34 +241,35 @@ def generate_publication_figure(results_dir, optimal_params):
                     true_p_t, true_cps = res['data']['true_p_t'], res['data']['true_cps']
         
         ax = axes[i, 0]
-        if all_k_samples:
-            sns.histplot(all_k_samples, ax=ax, discrete=True, stat='probability', shrink=0.8)
-        ax.set_title(f"Posterior k\n{scenario_name}"); ax.set_xlabel("Number of Changepoints (k)")
+        sns.histplot(all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.8)
+        ax.set_title(f"Histogram of $\\hat{{k}}$\n{scenario_name}")
+        ax.set_xlim(0, K_MAX)
+        ax.set_xlabel("Estimated Number of Changepoints ($\\hat{k}$)")
         ax.axvline(len(true_cps), color='red', linestyle='--', label=f'True k={len(true_cps)}'); ax.legend()
 
         ax = axes[i, 1]
         if true_cps:
-            if all_tau_samples:
-                sns.histplot(all_tau_samples, ax=ax, bins=T, kde=False)
+            if all_taus_est:
+                sns.histplot(all_taus_est, ax=ax, bins=T, kde=False)
             for cp_idx, cp in enumerate(true_cps):
                 ax.axvline(cp, color='red', linestyle='--', label='True CP' if cp_idx == 0 else "")
+            ax.set_xlim(0, T)
             ax.legend()
         else:
             ax.set_xlim(0, T) # Keep plot blank for K=0 scenario
-        ax.set_title("Posterior Changepoint Locations"); ax.set_xlabel("Time (t)"); ax.set_ylabel("Count")
+        ax.set_title("Histogram of Estimated CPs"); ax.set_xlabel("Time (t)"); ax.set_ylabel("Count")
 
         ax = axes[i, 2]
-        if rjmcmc_p_t_runs:
-            all_p_t_samples = np.vstack(rjmcmc_p_t_runs)
-            p_t_mean = np.mean(all_p_t_samples, axis=0)
-            p_t_lower = np.percentile(all_p_t_samples, 2.5, axis=0)
-            p_t_upper = np.percentile(all_p_t_samples, 97.5, axis=0)
-            ax.plot(p_t_mean, color='dodgerblue', label='RJMCMC Mean Estimate')
-            ax.fill_between(range(T), p_t_lower, p_t_upper, color='skyblue', alpha=0.4, label='RJMCMC 95% CrI')
+        if all_p_t_means:
+            avg_p_t_mean = np.mean(np.vstack(all_p_t_means), axis=0)
+            avg_p_t_lower = np.mean(np.vstack(all_p_t_lowers), axis=0)
+            avg_p_t_upper = np.mean(np.vstack(all_p_t_uppers), axis=0)
+            ax.plot(avg_p_t_mean, color='dodgerblue', label='RJMCMC Avg. Mean Estimate')
+            ax.fill_between(range(T), avg_p_t_lower, avg_p_t_upper, color='skyblue', alpha=0.4, label='RJMCMC Avg. 95% CrI')
 
         if rtacfr_p_t_runs:
             avg_rtacfr_p_t = np.mean(np.vstack(rtacfr_p_t_runs), axis=0)
-            ax.plot(avg_rtacfr_p_t, color='green', linestyle='--', lw=2, label='rtaCFR Mean Estimate')
+            ax.plot(avg_rtacfr_p_t, color='green', linestyle='--', lw=2, label='rtaCFR Avg. Estimate')
         
         ax.plot(true_p_t, color='black', lw=2, label='True CFR')
         ax.set_title("Averaged CFR Estimate"); ax.set_xlabel("Time (t)"); ax.set_ylabel("Fatality Rate"); ax.legend(); ax.set_ylim(bottom=0)
