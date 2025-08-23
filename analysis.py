@@ -27,14 +27,31 @@ from config import (SENSITIVITY_RESULTS_DIR, MAIN_RESULTS_DIR, PLOTS_DIR,
 # ==============================================================================
 
 def _logit_safe(p, eps=1e-9):
-    """Safely applies logit transformation by clamping values near 0 and 1."""
+    """
+    Safely applies the logit transformation by clamping input values to be
+    within a small epsilon of the [0, 1] interval to avoid infinity.
+
+    Args:
+        p (np.ndarray): Array of probabilities.
+        eps (float): A small epsilon value to prevent logit(0) or logit(1).
+
+    Returns:
+        np.ndarray: Logit-transformed values.
+    """
     p_safe = np.clip(p, eps, 1 - eps)
     return logit(p_safe)
 
 def calculate_mae(p_t_true, p_t_hat):
     """
     Calculates the Mean Absolute Error on the LOGIT-TRANSFORMED CFR.
-    This amplifies differences near 0 and 1.
+    This transformation amplifies differences for CFR values near 0 and 1.
+
+    Args:
+        p_t_true (np.ndarray): The true CFR time series.
+        p_t_hat (np.ndarray): The estimated CFR time series.
+
+    Returns:
+        float: The mean absolute error on the logit scale. Returns NaN if inputs are invalid.
     """
     if p_t_hat is None or p_t_true is None:
         return np.nan
@@ -46,12 +63,32 @@ def calculate_mae(p_t_true, p_t_hat):
     return np.nanmean(np.abs(true_logit - hat_logit))
 
 def calculate_accuracy(k_true, k_hat):
-    """Calculates the accuracy of the number of changepoints."""
+    """
+    Calculates the accuracy of the estimated number of changepoints (k).
+    Accuracy is 1 if k_est == k_true, and 0 otherwise.
+
+    Args:
+        k_true (int): The true number of changepoints.
+        k_hat (int): The estimated number of changepoints.
+
+    Returns:
+        float: 1.0 for a correct estimate, 0.0 otherwise. NaN for invalid input.
+    """
     if k_hat < 0: return np.nan
     return 1.0 if k_true == k_hat else 0.0
 
 def calculate_hausdorff(true_cps, est_cps):
-    """Calculates the Hausdorff distance between true and estimated changepoints."""
+    """
+    Calculates the Hausdorff distance between the true and estimated changepoint locations.
+    This metric measures the worst-case discrepancy between the two sets of points.
+
+    Args:
+        true_cps (list): A list of true changepoint locations.
+        est_cps (list): A list of estimated changepoint locations.
+
+    Returns:
+        float: The Hausdorff distance. Returns NaN or 0.0 for edge cases (e.g., empty sets).
+    """
     if not true_cps: return 0.0 if not est_cps else np.nan
     if not est_cps: return np.nan
     u = np.array(true_cps).reshape(-1, 1)
@@ -65,7 +102,16 @@ def calculate_hausdorff(true_cps, est_cps):
 # ==============================================================================
 
 def load_and_process_sensitivity_results(results_dir):
-    """Loads sensitivity results and computes metrics ONLY for RJMCMC."""
+    """
+    Loads and processes all result files from the sensitivity analysis directory.
+    It computes evaluation metrics for each run and aggregates them into a DataFrame.
+
+    Args:
+        results_dir (str): Path to the directory containing sensitivity result .pkl files.
+
+    Returns:
+        pd.DataFrame: A DataFrame with metrics and parameters for each sensitivity run.
+    """
     all_results = []
     fnames = [f for f in os.listdir(results_dir) if f.endswith('.pkl')]
     for fname in tqdm(fnames, desc=f"Loading sensitivity results from: {results_dir}"):
@@ -74,8 +120,11 @@ def load_and_process_sensitivity_results(results_dir):
             res = pickle.load(f)
         params = res.get('params', {})
         rjmcmc_res = res.get('rjmcmc', {})
+        
+        # Safely extract results, providing defaults for failed runs
         p_t_hat = rjmcmc_res.get('p_t_hat', np.full(T, np.nan))
         k_est = rjmcmc_res.get('k_est', -1)
+        
         all_results.append({
             'scenario': res['scenario'],
             'delay_setting': params.get('DELAY_DIST_NAME'),
@@ -88,7 +137,16 @@ def load_and_process_sensitivity_results(results_dir):
     return pd.DataFrame(all_results)
 
 def load_and_process_main_results(results_dir):
-    """Loads main simulation results and computes metrics for ALL methods."""
+    """
+    Loads and processes all result files from the main simulation directory.
+    It computes metrics for all methods (RJMCMC and benchmarks).
+
+    Args:
+        results_dir (str): Path to the directory containing main result .pkl files.
+
+    Returns:
+        pd.DataFrame: A DataFrame with metrics for each method and scenario.
+    """
     all_metrics = []
     fnames = [f for f in os.listdir(results_dir) if f.endswith('.pkl')]
     for fname in tqdm(fnames, desc=f"Loading main results from: {results_dir}"):
@@ -114,29 +172,46 @@ def find_optimal_hyperparameters(df_sens):
     """
     Finds the optimal hyperparameter combination from sensitivity results
     by ranking across Accuracy, Hausdorff Distance, and MAE.
+
+    Args:
+        df_sens (pd.DataFrame): The DataFrame from load_and_process_sensitivity_results.
+
+    Returns:
+        dict: A dictionary with the optimal 'PRIOR_K_GEOMETRIC_P' and 'PRIOR_THETA_SIGMA'.
     """
+    # Filter for the perfectly matched delay scenario to select the best parameters
     df_perfect = df_sens[df_sens['delay_setting'] == "Perfectly Matched Delay (Mean=15.43)"].copy()
     df_perfect.dropna(subset=['mae', 'accuracy'], inplace=True)
     
+    # Aggregate metrics across all scenarios for each hyperparameter combination
     grouped = df_perfect.groupby(['p_geom', 'theta_sigma']).agg(
         mean_mae=('mae', 'mean'),
         mean_accuracy=('accuracy', 'mean'),
-        mean_hd=('hausdorff', lambda x: x.mean(skipna=True))
+        mean_hd=('hausdorff', lambda x: x.mean(skipna=True)) # HD is NaN for "No Change"
     ).reset_index()
 
+    # Rank each metric (lower is better for MAE/HD, higher is better for accuracy)
     grouped['mae_rank'] = grouped['mean_mae'].rank(method='min')
     grouped['accuracy_rank'] = grouped['mean_accuracy'].rank(method='min', ascending=False)
     grouped['hd_rank'] = grouped['mean_hd'].rank(method='min')
     
+    # Calculate overall rank as the average of the three individual ranks
     grouped['overall_rank'] = grouped[['mae_rank', 'accuracy_rank', 'hd_rank']].mean(axis=1)
 
+    # Find the combination with the best (lowest) overall rank
     optimal_row = grouped.loc[grouped['overall_rank'].idxmin()]
     optimal_params = {'PRIOR_K_GEOMETRIC_P': optimal_row['p_geom'], 'PRIOR_THETA_SIGMA': optimal_row['theta_sigma']}
     print(f"\n--- Optimal Hyperparameter Selection ---\nSelected from 'Perfectly Matched Delay' scenario.\nOptimal p_geom: {optimal_params['PRIOR_K_GEOMETRIC_P']}\nOptimal theta_sigma: {optimal_params['PRIOR_THETA_SIGMA']}\n--------------------------------------\n")
     return optimal_params
 
 def generate_main_results_table(df_main):
-    """Generates and saves a LaTeX table from the main simulation results."""
+    """
+    Generates and saves a LaTeX table from the main simulation results.
+
+    Args:
+        df_main (pd.DataFrame): The DataFrame from load_and_process_main_results.
+    """
+    # Calculate mean and standard deviation for each metric, grouped by scenario and method
     summary = df_main.groupby(['scenario', 'method']).agg(
         accuracy_mean=('accuracy', 'mean'),
         hausdorff_mean=('hausdorff', lambda x: x.mean(skipna=True)),
@@ -145,13 +220,16 @@ def generate_main_results_table(df_main):
         mae_std=('mae', 'std')
     ).reset_index()
 
+    # Pivot the table for LaTeX formatting
     pivot = summary.pivot(index='scenario', columns='method')
     scenario_order = list(SCENARIOS.keys())
     method_order = ['RJMCMC', 'Pelt', 'BinSeg']
     
+    # Reorder rows and columns to match the desired table structure
     pivot = pivot.reindex(scenario_order)
     pivot = pivot.reindex(columns=[(level1, level2) for level1 in pivot.columns.levels[0] for level2 in method_order])
 
+    # Build the LaTeX string dynamically
     latex_string = "\\begin{table}[ht]\n"
     latex_string += "\\centering\n"
     latex_string += "\\caption{Performance summary under optimal priors. Mean (std) reported for HD and Logit MAE.}\n"
@@ -160,6 +238,7 @@ def generate_main_results_table(df_main):
     latex_string += "\\begin{tabular}{l" + "ccc" * len(method_order) + "}\n"
     latex_string += "\\toprule\n"
     
+    # Header row
     latex_string += "Scenario & "
     for method in method_order:
         method_label = "Proposed (RJMCMC)" if method == "RJMCMC" else method
@@ -167,10 +246,12 @@ def generate_main_results_table(df_main):
     latex_string = latex_string.rstrip(' &') + " \\\\\n"
     latex_string += "\\cmidrule(lr){2-4} \\cmidrule(lr){5-7} \\cmidrule(lr){8-10}\n"
     
+    # Sub-header row
     latex_string += " & " + "Accuracy & Hausdorff (HD) & Logit MAE & " * len(method_order)
     latex_string = latex_string.rstrip(' &') + " \\\\\n"
     latex_string += "\\midrule\n"
     
+    # Data rows
     for scenario in scenario_order:
         latex_string += f"{scenario} & "
         for method in method_order:
@@ -190,6 +271,7 @@ def generate_main_results_table(df_main):
     latex_string += "\\end{tabular}}\n"
     latex_string += "\\end{table}"
 
+    # Save the LaTeX string to a .tex file
     save_path = os.path.join(PLOTS_DIR, "main_results_table.tex")
     with open(save_path, 'w') as f:
         f.write(latex_string)
@@ -201,16 +283,26 @@ def generate_main_results_table(df_main):
 # ==============================================================================
 
 def generate_publication_figure(results_dir, optimal_params):
-    """Generates the 5x3 publication figure by aggregating summarized results."""
+    """
+    Generates the 5x3 publication figure by aggregating summarized results.
+    Each row corresponds to a scenario, and columns show posterior k,
+    posterior changepoint locations, and the averaged CFR estimate.
+
+    Args:
+        results_dir (str): Path to the main simulation results directory.
+        optimal_params (dict): Dictionary of optimal hyperparameters.
+    """
     fig, axes = plt.subplots(len(SCENARIOS), 3, figsize=(18, 22), gridspec_kw={'width_ratios': [1, 1, 2]})
     scenario_order = list(SCENARIOS.keys())
 
     for i, scenario_name in enumerate(scenario_order):
+        # --- Aggregate summarized data for the current scenario ---
         all_k_est, all_taus_est = [], []
         all_p_t_means, all_p_t_lowers, all_p_t_uppers = [], [], []
         rtacfr_p_t_runs = []
         true_p_t, true_cps = None, None
 
+        # Find all result files for the current scenario that used optimal parameters
         fnames = [f for f in os.listdir(results_dir) if scenario_name.replace(' ', '_') in f]
         for fname in fnames:
             p_opt = optimal_params['PRIOR_K_GEOMETRIC_P']
@@ -219,6 +311,7 @@ def generate_publication_figure(results_dir, optimal_params):
                 with open(os.path.join(results_dir, fname), 'rb') as f:
                     res = pickle.load(f)
                 
+                # Collect summarized RJMCMC statistics from each run
                 rjmcmc_res = res.get('rjmcmc', {})
                 all_k_est.append(rjmcmc_res.get('k_est', -1))
                 all_taus_est.extend(rjmcmc_res.get('taus_est', []))
@@ -226,6 +319,7 @@ def generate_publication_figure(results_dir, optimal_params):
                 all_p_t_lowers.append(rjmcmc_res.get('p_t_lower_ci', np.full(T, np.nan)))
                 all_p_t_uppers.append(rjmcmc_res.get('p_t_upper_ci', np.full(T, np.nan)))
                 
+                # Load the corresponding raw rtaCFR signal from its cache
                 match = re.search(r'_rep(\d+)', fname)
                 if match:
                     rep_idx = int(match.group(1))
@@ -240,6 +334,7 @@ def generate_publication_figure(results_dir, optimal_params):
                 if true_p_t is None:
                     true_p_t, true_cps = res['data']['true_p_t'], res['data']['true_cps']
         
+        # --- Column 1: Histogram of Posterior Mode k ---
         ax = axes[i, 0]
         sns.histplot(all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.8)
         ax.set_title(f"Histogram of $\\hat{{k}}$\n{scenario_name}")
@@ -247,18 +342,19 @@ def generate_publication_figure(results_dir, optimal_params):
         ax.set_xlabel("Estimated Number of Changepoints ($\\hat{k}$)")
         ax.axvline(len(true_cps), color='red', linestyle='--', label=f'True k={len(true_cps)}'); ax.legend()
 
+        # --- Column 2: Histogram of Estimated Changepoint Locations ---
         ax = axes[i, 1]
         if true_cps:
             if all_taus_est:
                 sns.histplot(all_taus_est, ax=ax, bins=T, kde=False)
             for cp_idx, cp in enumerate(true_cps):
                 ax.axvline(cp, color='red', linestyle='--', label='True CP' if cp_idx == 0 else "")
-            ax.set_xlim(0, T)
             ax.legend()
         else:
             ax.set_xlim(0, T) # Keep plot blank for K=0 scenario
         ax.set_title("Histogram of Estimated CPs"); ax.set_xlabel("Time (t)"); ax.set_ylabel("Count")
 
+        # --- Column 3: Averaged CFR Estimate ---
         ax = axes[i, 2]
         if all_p_t_means:
             avg_p_t_mean = np.mean(np.vstack(all_p_t_means), axis=0)
@@ -280,7 +376,13 @@ def generate_publication_figure(results_dir, optimal_params):
     print(f"Publication figure saved at: {save_path}")
 
 def generate_sensitivity_heatmap_grid(df_sens):
-    """Generates a 3x3 grid of heatmaps for the sensitivity analysis."""
+    """
+    Generates a 3x3 grid of heatmaps for the sensitivity analysis.
+    Each subplot shows a different metric vs. delay assumption.
+
+    Args:
+        df_sens (pd.DataFrame): The DataFrame from load_and_process_sensitivity_results.
+    """
     delay_order = list(DELAY_DIST_SENSITIVITY.keys())
     metrics = ['accuracy', 'hausdorff', 'mae']
     metric_titles = ['Accuracy P(k_est=k_true)', 'Hausdorff Distance (HD)', 'Mean Absolute Error (MAE)']
@@ -295,12 +397,17 @@ def generate_sensitivity_heatmap_grid(df_sens):
         for col, metric in enumerate(metrics):
             ax = axes[row, col]
             
+            # Filter data for the current delay setting
             delay_df = df_sens[df_sens['delay_setting'] == delay_name]
+            
+            # Group by hyperparameters and average the metric over all 5 scenarios
             pivot_df = delay_df.groupby(['p_geom', 'theta_sigma'])[metric].mean().reset_index()
             pivot_table = pivot_df.pivot(index='theta_sigma', columns='p_geom', values=metric)
             
+            # Plot the heatmap
             sns.heatmap(pivot_table, ax=ax, annot=True, fmt=".3f", cmap="viridis", linewidths=.5)
             
+            # Set titles and labels for clarity
             if row == 0:
                 ax.set_title(metric_titles[col], fontsize=14)
             if col == 0:
@@ -322,10 +429,12 @@ def full_analysis_workflow():
     """The full, two-stage analysis workflow."""
     os.makedirs(PLOTS_DIR, exist_ok=True)
     
+    # Stage 1: Analyze sensitivity results
     df_sens = load_and_process_sensitivity_results(SENSITIVITY_RESULTS_DIR)
     generate_sensitivity_heatmap_grid(df_sens)
     optimal_params = find_optimal_hyperparameters(df_sens)
     
+    # Stage 2: Analyze main simulation results
     df_main = load_and_process_main_results(MAIN_RESULTS_DIR)
     generate_main_results_table(df_main)
     generate_publication_figure(MAIN_RESULTS_DIR, optimal_params)

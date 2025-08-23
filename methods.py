@@ -4,6 +4,7 @@
 This script contains the core estimation algorithms used in the simulation study.
 It includes:
 - The proposed RJMCMC sampler, accelerated with Numba.
+- Three different methods for summarizing the posterior distribution of changepoints.
 - The rtaCFR fused lasso signal estimator, implemented with cvxpy.
 - Wrappers for the benchmark methods (PELT and Binary Segmentation).
 """
@@ -12,6 +13,7 @@ import os
 import numpy as np
 from scipy.stats import norm
 from scipy.special import expit
+from scipy.signal import find_peaks
 import ruptures as rpt
 from numba import njit
 from collections import Counter
@@ -35,24 +37,30 @@ def _sigmoid(x):
 
 @njit
 def _calculate_log_likelihood(deaths, cases, theta_t, delay_pmf, T):
-    """Calculates the log-likelihood of the death series."""
+    """
+    Calculates the log-likelihood of the death series given the latent CFR process.
+    This is the core of the model's objective function.
+    """
     p_t = _sigmoid(theta_t)
     signal = cases * p_t
     expected_deaths = np.zeros(T)
+    # Convolve the signal of new fatal cases with the delay distribution
     for i in range(T):
         for j in range(i + 1):
             if j < len(delay_pmf):
                 expected_deaths[i] += signal[i - j] * delay_pmf[j]
+    
+    # Calculate Poisson log-likelihood
     log_lik = 0.0
     for t in range(T):
-        mu = max(1e-9, expected_deaths[t])
+        mu = max(1e-9, expected_deaths[t]) # Ensure mu is positive
         log_lik += deaths[t] * np.log(mu) - mu
     return log_lik
 
 
 @njit
 def _get_theta_t_from_state(k, taus, theta_values, T):
-    """Constructs the full theta(t) time series from a given state."""
+    """Constructs the full theta(t) time series from a given state (k, taus, theta_values)."""
     theta_t = np.zeros(T)
     boundaries = np.array([0] + list(taus) + [T])
     for i in range(k + 1):
@@ -84,34 +92,36 @@ def _log_pmf_geometric(k, p):
 # @njit
 def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_sigma, u_sigma, theta_prop_sigma, move_window):
     """The core RJMCMC sampler loop, parameterized for sensitivity analysis."""
+    # Initialize state variables
     k = 0
     taus = np.array([], dtype=np.int64)
     theta_values = np.array([np.random.normal(theta_mu, theta_sigma)])
+    
+    # Pre-allocate arrays to store posterior samples
     k_samples = np.zeros(MCMC_ITER, dtype=np.int64)
     taus_samples = np.full((MCMC_ITER, K_MAX), -1, dtype=np.int64)
     theta_samples = np.full((MCMC_ITER, K_MAX + 1), np.nan, dtype=np.float64)
 
     for iter_idx in range(MCMC_ITER + MCMC_BURN_IN):
+        # Calculate current log-likelihood and priors
         theta_t_current = _get_theta_t_from_state(k, taus, theta_values, T)
         log_lik_current = _calculate_log_likelihood(deaths, cases, theta_t_current, delay_pmf, T)
-        
         log_prior_k_current = _log_pmf_geometric(k, p_geom)
-        log_prior_theta_current = 0.0
-        for val in theta_values:
-            log_prior_theta_current += _log_pdf_normal(val, theta_mu, theta_sigma)
+        log_prior_theta_current = np.sum(_log_pdf_normal(theta_values, theta_mu, theta_sigma))
 
+        # Randomly choose a move type
         u_move = np.random.rand()
-        if k == 0:
-            move_type = "birth"
-        elif k == K_MAX:
-            move_type = "death"
+        if k == 0: move_type = "birth"
+        elif k == K_MAX: move_type = "death"
         else:
             if u_move < 0.25: move_type = "birth"
             elif u_move < 0.50: move_type = "death"
             elif u_move < 0.75: move_type = "move"
             else: move_type = "update"
 
+        # --- RJMCMC Move Types ---
         if move_type == "birth":
+            # Propose adding a new changepoint
             possible_cps = np.array([i for i in range(1, T) if i not in taus])
             if len(possible_cps) > 0:
                 tau_star = np.random.choice(possible_cps)
@@ -119,42 +129,52 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_s
                 theta_j = theta_values[seg_idx]
                 u_aux = np.random.normal(0, u_sigma)
                 theta1_star, theta2_star = theta_j - u_aux, theta_j + u_aux
+                
+                # New state
                 k_new, taus_new = k + 1, np.sort(np.append(taus, tau_star))
                 theta_values_new = np.concatenate((theta_values[:seg_idx], np.array([theta1_star, theta2_star]), theta_values[seg_idx+1:]))
+                
+                # Metropolis-Hastings-Green acceptance probability
                 theta_t_new = _get_theta_t_from_state(k_new, taus_new, theta_values_new, T)
                 log_lik_new = _calculate_log_likelihood(deaths, cases, theta_t_new, delay_pmf, T)
                 log_prior_k_new = _log_pmf_geometric(k_new, p_geom)
-                log_prior_theta_new = 0.0
-                for val in theta_values_new:
-                    log_prior_theta_new += _log_pdf_normal(val, theta_mu, theta_sigma)
+                log_prior_theta_new = np.sum(_log_pdf_normal(theta_values_new, theta_mu, theta_sigma))
+                
                 log_lik_ratio = log_lik_new - log_lik_current
                 log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
-                log_proposal_ratio = -_log_pdf_normal(u_aux, 0, u_sigma)
+                log_proposal_ratio = -_log_pdf_normal(u_aux, 0, u_sigma) # Jacobian is 1
+                
                 log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
                 if np.log(np.random.rand()) < log_alpha:
                     k, taus, theta_values = k_new, taus_new, theta_values_new
 
         elif move_type == "death":
+            # Propose removing an existing changepoint
             idx_to_remove = np.random.randint(0, k)
             theta1, theta2 = theta_values[idx_to_remove], theta_values[idx_to_remove+1]
             theta_j_star = (theta1 + theta2) / 2.0
             u_aux = (theta2 - theta1) / 2.0
+            
+            # New state
             k_new, taus_new = k - 1, np.delete(taus, idx_to_remove)
             theta_values_new = np.concatenate((theta_values[:idx_to_remove], np.array([theta_j_star]), theta_values[idx_to_remove+2:]))
+            
+            # Acceptance probability
             theta_t_new = _get_theta_t_from_state(k_new, taus_new, theta_values_new, T)
             log_lik_new = _calculate_log_likelihood(deaths, cases, theta_t_new, delay_pmf, T)
             log_prior_k_new = _log_pmf_geometric(k_new, p_geom)
-            log_prior_theta_new = 0.0
-            for val in theta_values_new:
-                log_prior_theta_new += _log_pdf_normal(val, theta_mu, theta_sigma)
+            log_prior_theta_new = np.sum(_log_pdf_normal(theta_values_new, theta_mu, theta_sigma))
+            
             log_lik_ratio = log_lik_new - log_lik_current
             log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
-            log_proposal_ratio = _log_pdf_normal(u_aux, 0, u_sigma)
+            log_proposal_ratio = _log_pdf_normal(u_aux, 0, u_sigma) # Inverse of birth proposal
+            
             log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
             if np.log(np.random.rand()) < log_alpha:
                 k, taus, theta_values = k_new, taus_new, theta_values_new
 
         elif move_type == "move" and k > 0:
+            # Propose moving a changepoint within a local window
             idx_to_move = np.random.randint(0, k)
             tau_current = taus[idx_to_move]
             lower_prop = max(1, tau_current - move_window)
@@ -173,6 +193,7 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_s
                         taus = np.sort(taus_new)
 
         elif move_type == "update":
+            # Update the value of a theta parameter
             for j in range(k + 1):
                 theta_current = theta_values[j]
                 theta_proposal = np.random.normal(theta_current, theta_prop_sigma)
@@ -186,6 +207,7 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_s
                     theta_values[j] = theta_proposal
                     log_lik_current = log_lik_new
 
+        # Store the sample after the burn-in period
         if iter_idx >= MCMC_BURN_IN:
             sample_idx = iter_idx - MCMC_BURN_IN
             k_samples[sample_idx] = k
@@ -200,10 +222,50 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_s
 # MAIN WRAPPER AND BENCHMARK FUNCTIONS
 # ==============================================================================
 
-def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA):
+def posterior_inclusion_probabilities(k_samples, taus_samples, T):
     """
-    Main wrapper for the RJMCMC sampler. This version calculates summary
-    statistics and discards the raw samples to save memory.
+    Computes the Posterior Inclusion Probability (PIP) for each time point.
+    PIP at time t is the posterior probability that a changepoint occurs at t.
+    """
+    hits = np.zeros(T, dtype=np.int64)
+    S = len(k_samples)
+    for s in range(S):
+        k = int(k_samples[s])
+        if k <= 0: continue
+        taus = taus_samples[s, :k]
+        for tau in taus:
+            if 0 <= tau < T:
+                hits[int(tau)] += 1
+    return hits / float(S)
+
+def pick_cps_from_pip(pip, w=7, min_height=None, max_k=None, min_prominence=0.0):
+    """
+    Identifies changepoints by finding peaks in the PIP curve.
+    """
+    T = len(pip)
+    height = (0.5 * pip.max()) if min_height is None else min_height
+    peaks, _ = find_peaks(pip, distance=w, height=height, prominence=min_prominence)
+    if max_k is not None and len(peaks) > max_k:
+        order = np.argsort(pip[peaks])[::-1][:max_k]
+        peaks = np.sort(peaks[order])
+    return peaks.astype(int)
+
+def rank_conditioned_cp_summary(k_samples, taus_samples):
+    """
+    Summarizes changepoints by conditioning on the posterior mode of K.
+    It then finds the median location for each ranked changepoint.
+    """
+    K_star = Counter(k_samples).most_common(1)[0][0]
+    subset = np.where(k_samples == K_star)[0]
+    if K_star == 0 or len(subset) == 0:
+        return []
+    taus_ranked = np.sort(taus_samples[subset, :K_star], axis=1)
+    cps = np.median(taus_ranked, axis=0).astype(int).tolist()
+    return cps
+
+def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA, summary_method='mode'):
+    """
+    Main wrapper for the RJMCMC sampler. Returns summarized statistics.
     """
     T_data = data["cases"].shape[0]
     delay_pmf = np.diff(DELAY_DIST.cdf(np.arange(T_data + 1)))
@@ -215,36 +277,54 @@ def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA):
     )
     
     # --- Post-processing ---
-    # Calculate p(t) for each sample
     p_t_samples = np.zeros((MCMC_ITER, T_data))
     for i in range(MCMC_ITER):
         k, taus, thetas = k_samples[i], taus_samples[i, :k_samples[i]], theta_samples[i, :(k_samples[i] + 1)]
         theta_t_sample = _get_theta_t_from_state(k, taus, thetas, T_data)
         p_t_samples[i, :] = _sigmoid(theta_t_sample)
     
-    # Calculate summary statistics
     p_t_mean = np.mean(p_t_samples, axis=0)
     p_t_lower_ci = np.percentile(p_t_samples, 2.5, axis=0)
     p_t_upper_ci = np.percentile(p_t_samples, 97.5, axis=0)
     
-    est_k = int(Counter(k_samples).most_common(1)[0][0])
-    est_taus = []
-    if est_k > 0:
-        relevant_taus = taus_samples[k_samples == est_k, :est_k]
+    # --- Calculate all three changepoint summaries ---
+    # 1. Posterior Mode of K (original method)
+    k_est_mode = int(Counter(k_samples).most_common(1)[0][0])
+    taus_est_mode = []
+    if k_est_mode > 0:
+        relevant_taus = taus_samples[k_samples == k_est_mode, :k_est_mode]
         tau_tuples = [tuple(row) for row in relevant_taus]
         if tau_tuples:
-            est_taus = sorted(list(Counter(tau_tuples).most_common(1)[0][0]))
-            
-    # Return ONLY the summarized results
-    return {
-        "k_est": est_k, 
-        "taus_est": est_taus, 
-        "p_t_hat": p_t_mean, # Use p_t_hat for consistency with benchmarks
-        "p_t_lower_ci": p_t_lower_ci,
-        "p_t_upper_ci": p_t_upper_ci
+            taus_est_mode = sorted(list(Counter(tau_tuples).most_common(1)[0][0]))
+
+    # 2. Posterior Inclusion Probability (PIP)
+    pip = posterior_inclusion_probabilities(k_samples, taus_samples, T_data)
+    taus_est_pip = pick_cps_from_pip(pip)
+
+    # 3. Rank-Conditioned Summary
+    taus_est_cond = rank_conditioned_cp_summary(k_samples, taus_samples)
+
+    all_estimates = {
+        'pip': taus_est_pip,
+        'mode': taus_est_mode,
+        'cond': taus_est_cond
     }
-
-
+    
+    # Set the primary output based on the chosen method (default is mode)
+    final_taus = all_estimates.get(summary_method, taus_est_mode)
+    final_k = len(final_taus)
+            
+    return {
+        "k_est": final_k, 
+        "taus_est": final_taus, 
+        "p_t_hat": p_t_mean,
+        "p_t_lower_ci": p_t_lower_ci,
+        "p_t_upper_ci": p_t_upper_ci,
+        "taus_est_pip": taus_est_pip,
+        "taus_est_mode": taus_est_mode,
+        "taus_est_cond": taus_est_cond,
+        "pip_array": pip 
+    }
 
 def _run_rtacfr_fusedlasso_internal(data):
     """Internal function to get the fused lasso signal estimate using cvxpy."""
