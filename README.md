@@ -15,9 +15,9 @@ A research codebase for detecting changepoints in a time‑varying case fatality
 ├── Simulation_Analysis.ipynb  # Simulation pipeline
 ├── JP_Data.csv                # Real‑data CSV (Japan) used by the notebook(s)
 └── (auto‑created at runtime)
-    ├── results_cache/         # Cached rtaCFR signals
-    ├── results_sensitivity/   # Sensitivity study outputs
-    ├── results_main/          # Main simulation outputs
+    ├── rtacfr_cache/          # Cached rtaCFR signals
+    ├── results/sensitivity/   # Sensitivity study outputs
+    ├── results/main/          # Main simulation outputs
     └── plots/                 # Figures exported by analysis.py
 ```
 
@@ -48,9 +48,9 @@ pip install -r requirements.txt
 
 The notebook `Simulation_Analysis.ipynb` runs:
 
-1. **Sensitivity analysis** over prior hyperparameters for RJMCMC (writes to `results_sensitivity/`).
+1. **Sensitivity analysis** over prior hyperparameters for RJMCMC (writes to `results/sensitivity/`).
 
-2. **Main experiments** with the optimal hyperparameters (writes to `results_main/`).
+2. **Main experiments** with the optimal hyperparameters (writes to `results/main/`).
 
 3. **Figures & tables** via `analysis.py` (written to `plots/`).
 
@@ -88,7 +88,7 @@ Outputs:
 
 * Posterior summaries/figures to `plots/`
 
-* Optional cached signals to `results_cache/`
+* Optional cached signals to `rtacfr_cache/`
 
 ## Reproducing figures & tables
 
@@ -100,9 +100,9 @@ python analysis.py
 
 This script will:
 
-* Load summaries from `results_sensitivity/` and derive the baseline priors
+* Load summaries from `results/sensitivity/` and derive the baseline priors
 
-* Load `results_main/`, aggregate metrics, and export:
+* Load `results/main/`, aggregate metrics, and export:
 
   * `plots/publication_figure.pdf`
 
@@ -118,9 +118,9 @@ If a directory is missing, the script will warn and exit cleanly.
 
 * **Determinism:** A global `SEED` is defined in `config.py` and is offset by replication indices where appropriate.
 
-* **Caching:** rtaCFR signals are cached per scenario/rep in `results_cache/` to avoid recomputation.
+* **Caching:** rtaCFR signals are cached per scenario/rep in `rtacfr_cache/` to avoid recomputation.
 
-* **Numba:** The JIT‑accelerated helpers are in `methods.py`. The main RJMCMC loop can be toggled to JIT if you are not using multiprocessing.
+* **Numba:** The JIT-accelerated helpers are in `methods.py`. The main RJMCMC loop can be toggled to JIT if you are not using multiprocessing.
 
 * **Memory use:** `analysis.py` loads only summaries (not full posterior arrays) for aggregation to keep memory usage modest.
 
