@@ -22,6 +22,19 @@ from config import (SENSITIVITY_RESULTS_DIR, MAIN_RESULTS_DIR, PLOTS_DIR,
                     SCENARIOS, T, SENSITIVITY_GRID_PRIORS, DELAY_DIST_SENSITIVITY,
                     SIGNAL_CACHE_DIR, K_MAX)
 
+# --- Global plotting style for publication-quality figures ---
+sns.set_theme(context='talk', style='whitegrid')
+plt.rcParams.update({
+    'font.size': 12,
+    'axes.titlesize': 18,
+    'axes.labelsize': 16,
+    'legend.fontsize': 12,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'axes.linewidth': 1.2,
+    'lines.linewidth': 2.0
+})
+
 # ==============================================================================
 # EVALUATION METRICS
 # ==============================================================================
@@ -292,7 +305,21 @@ def generate_publication_figure(results_dir, optimal_params):
         results_dir (str): Path to the main simulation results directory.
         optimal_params (dict): Dictionary of optimal hyperparameters.
     """
-    fig, axes = plt.subplots(len(SCENARIOS), 3, figsize=(18, 22), gridspec_kw={'width_ratios': [1, 1, 2]})
+    # Larger canvas, clearer default styles for publication
+    fig, axes = plt.subplots(
+        len(SCENARIOS), 3,
+        figsize=(22, 26),
+        gridspec_kw={'width_ratios': [1, 1, 2]}
+    )
+    plt.rcParams.update({
+        'font.size': 12,
+        'axes.titlesize': 18,
+        'axes.labelsize': 16,
+        'legend.fontsize': 12,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'axes.linewidth': 1.2
+    })
     scenario_order = list(SCENARIOS.keys())
 
     for i, scenario_name in enumerate(scenario_order):
@@ -336,23 +363,34 @@ def generate_publication_figure(results_dir, optimal_params):
         
         # --- Column 1: Histogram of Posterior Mode k ---
         ax = axes[i, 0]
-        sns.histplot(all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.8)
+        sns.histplot(
+            all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.8,
+            edgecolor='white', linewidth=0.8, color='tab:blue'
+        )
         ax.set_title(f"Histogram of $\\hat{{k}}$\n{scenario_name}")
         ax.set_xlim(0, K_MAX)
         ax.set_xlabel("Estimated Number of Changepoints ($\\hat{k}$)")
-        ax.axvline(len(true_cps), color='red', linestyle='--', label=f'True k={len(true_cps)}'); ax.legend()
+        ax.grid(True, axis='y', linestyle=':', alpha=0.5)
+        ax.axvline(len(true_cps), color='red', linestyle='--', linewidth=2,
+                   label=f'True k={len(true_cps)}')
+        ax.legend(frameon=False)
 
         # --- Column 2: Histogram of Estimated Changepoint Locations ---
         ax = axes[i, 1]
         if true_cps:
             if all_taus_est:
-                sns.histplot(all_taus_est, ax=ax, bins=T, kde=False)
+                sns.histplot(
+                    all_taus_est, ax=ax, bins=T, kde=False,
+                    edgecolor='white', linewidth=0.6, color='tab:purple'
+                )
             for cp_idx, cp in enumerate(true_cps):
-                ax.axvline(cp, color='red', linestyle='--', label='True CP' if cp_idx == 0 else "")
-            ax.legend()
+                ax.axvline(cp, color='red', linestyle='--', linewidth=2,
+                           label='True CP' if cp_idx == 0 else "")
+            ax.legend(frameon=False)
         else:
             ax.set_xlim(0, T) # Keep plot blank for K=0 scenario
         ax.set_title("Histogram of Estimated CPs"); ax.set_xlabel("Time (t)"); ax.set_ylabel("Count")
+        ax.grid(True, axis='y', linestyle=':', alpha=0.5)
 
         # --- Column 3: Averaged CFR Estimate ---
         ax = axes[i, 2]
@@ -360,19 +398,30 @@ def generate_publication_figure(results_dir, optimal_params):
             avg_p_t_mean = np.mean(np.vstack(all_p_t_means), axis=0)
             avg_p_t_lower = np.mean(np.vstack(all_p_t_lowers), axis=0)
             avg_p_t_upper = np.mean(np.vstack(all_p_t_uppers), axis=0)
-            ax.plot(avg_p_t_mean, color='dodgerblue', label='RJMCMC Avg. Mean Estimate')
-            ax.fill_between(range(T), avg_p_t_lower, avg_p_t_upper, color='skyblue', alpha=0.4, label='RJMCMC Avg. 95% CrI')
+            ax.plot(avg_p_t_mean, color='dodgerblue', linewidth=2.5, label='RJMCMC Avg. Mean Estimate')
+            ax.fill_between(range(T), avg_p_t_lower, avg_p_t_upper,
+                            color='skyblue', alpha=0.35,
+                            label='RJMCMC Avg. 95% CrI')
 
         if rtacfr_p_t_runs:
             avg_rtacfr_p_t = np.mean(np.vstack(rtacfr_p_t_runs), axis=0)
-            ax.plot(avg_rtacfr_p_t, color='green', linestyle='--', lw=2, label='rtaCFR Avg. Estimate')
+            ax.plot(avg_rtacfr_p_t, color='green', linestyle='--', lw=2.5,
+                    label='rtaCFR Avg. Estimate')
         
-        ax.plot(true_p_t, color='black', lw=2, label='True CFR')
-        ax.set_title("Averaged CFR Estimate"); ax.set_xlabel("Time (t)"); ax.set_ylabel("Fatality Rate"); ax.legend(); ax.set_ylim(bottom=0)
+        ax.plot(true_p_t, color='black', lw=3, label='True CFR')
+        ax.set_title("Averaged CFR Estimate");
+        ax.set_xlabel("Time (t)"); ax.set_ylabel("Fatality Rate");
+        ax.set_ylim(bottom=0)
+        ax.grid(True, linestyle=':', alpha=0.4)
+        ax.legend(frameon=False)
 
     plt.tight_layout(h_pad=3)
     save_path = os.path.join(PLOTS_DIR, "publication_figure.pdf")
-    plt.savefig(save_path, dpi=300, bbox_inches='tight'); plt.close(fig)
+    # Save higher-resolution versions
+    plt.savefig(save_path, dpi=400, bbox_inches='tight')
+    png_path = os.path.join(PLOTS_DIR, "publication_figure.png")
+    plt.savefig(png_path, dpi=400, bbox_inches='tight')
+    plt.close(fig)
     print(f"Publication figure saved at: {save_path}")
 
 def generate_sensitivity_heatmap_grid(df_sens):
@@ -385,10 +434,19 @@ def generate_sensitivity_heatmap_grid(df_sens):
     """
     delay_order = list(DELAY_DIST_SENSITIVITY.keys())
     metrics = ['accuracy', 'hausdorff', 'mae']
-    metric_titles = ['Accuracy P(k_est=k_true)', 'Hausdorff Distance (HD)', 'Mean Absolute Error (MAE)']
-    
-    fig, axes = plt.subplots(3, 3, figsize=(20, 18))
-    fig.suptitle('Sensitivity of RJMCMC Performance to Priors and Delay Misspecification', fontsize=20, y=1.02)
+    metric_titles = ['Accuracy P(k_est = k_true)', 'Hausdorff Distance (HD)', 'Mean Absolute Error (MAE)']
+
+    # Determine consistent color scale per-metric for readability/comparability
+    metric_vmin = {m: np.nanmin(df_sens[m]) for m in metrics}
+    metric_vmax = {m: np.nanmax(df_sens[m]) for m in metrics}
+
+    # Larger canvas for publication and bigger base fonts
+    fig, axes = plt.subplots(3, 3, figsize=(24, 20))
+    fig.suptitle(
+        'Sensitivity of RJMCMC Performance to Priors and Delay Misspecification',
+        fontsize=26,
+        y=0.995
+    )
 
     p_geom_labels = SENSITIVITY_GRID_PRIORS['PRIOR_K_GEOMETRIC_P']
     theta_sigma_labels = SENSITIVITY_GRID_PRIORS['PRIOR_THETA_SIGMA']
@@ -404,24 +462,47 @@ def generate_sensitivity_heatmap_grid(df_sens):
             pivot_df = delay_df.groupby(['p_geom', 'theta_sigma'])[metric].mean().reset_index()
             pivot_table = pivot_df.pivot(index='theta_sigma', columns='p_geom', values=metric)
             
-            # Plot the heatmap
-            sns.heatmap(pivot_table, ax=ax, annot=True, fmt=".3f", cmap="viridis", linewidths=.5)
+            # Plot the heatmap with larger text and clearer styling
+            heat = sns.heatmap(
+                pivot_table,
+                ax=ax,
+                annot=True,
+                fmt=".2f",
+                cmap="viridis",
+                linewidths=1.0,
+                linecolor='white',
+                cbar_kws={'shrink': 0.9},
+                annot_kws={'fontsize': 12},
+                vmin=metric_vmin[metric],
+                vmax=metric_vmax[metric],
+                square=True
+            )
             
             # Set titles and labels for clarity
             if row == 0:
-                ax.set_title(metric_titles[col], fontsize=14)
+                ax.set_title(metric_titles[col], fontsize=18)
             if col == 0:
-                ax.set_ylabel(delay_name, fontsize=14)
+                ax.set_ylabel(delay_name, fontsize=16)
             else:
                 ax.set_ylabel('')
 
-            ax.set_xlabel('p_geom')
-            ax.set_xticklabels(p_geom_labels)
-            ax.set_yticklabels(theta_sigma_labels, rotation=0)
+            ax.set_xlabel('p_geom', fontsize=16)
+            ax.set_xticklabels(p_geom_labels, rotation=0, fontsize=12)
+            ax.set_yticklabels(theta_sigma_labels, rotation=0, fontsize=12)
+            ax.tick_params(axis='both', labelsize=12)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.98])
+            # Enlarge colorbar tick labels
+            if heat.collections:
+                cbar = heat.collections[0].colorbar
+                if cbar is not None:
+                    cbar.ax.tick_params(labelsize=12)
+
+    # Improve layout spacing; export high-res PDF and PNG
+    plt.tight_layout(rect=[0, 0, 1, 0.965])
     save_path = os.path.join(PLOTS_DIR, "sensitivity_analysis_heatmap_grid.pdf")
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig(save_path, dpi=400, bbox_inches='tight')
+    png_path = os.path.join(PLOTS_DIR, "sensitivity_analysis_heatmap_grid.png")
+    plt.savefig(png_path, dpi=400, bbox_inches='tight')
     plt.close(fig)
     print(f"Sensitivity analysis heatmap grid saved at: {save_path}")
 

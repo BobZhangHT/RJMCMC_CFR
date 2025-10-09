@@ -142,7 +142,7 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_s
                 
                 log_lik_ratio = log_lik_new - log_lik_current
                 log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
-                log_proposal_ratio = -_log_pdf_normal(u_aux, 0, u_sigma) # Jacobian is 1
+                log_proposal_ratio = -_log_pdf_normal(u_aux, 0, u_sigma) + np.log(2) # Jacobian is 2
                 
                 log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
                 if np.log(np.random.rand()) < log_alpha:
@@ -167,7 +167,7 @@ def _rjmcmc_sampler_numba(deaths, cases, delay_pmf, T, p_geom, theta_mu, theta_s
             
             log_lik_ratio = log_lik_new - log_lik_current
             log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
-            log_proposal_ratio = _log_pdf_normal(u_aux, 0, u_sigma) # Inverse of birth proposal
+            log_proposal_ratio = _log_pdf_normal(u_aux, 0, u_sigma) - np.log(2) # Inverse of birth proposal (Jacobian is 1/2)
             
             log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
             if np.log(np.random.rand()) < log_alpha:

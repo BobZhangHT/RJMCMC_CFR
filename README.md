@@ -1,6 +1,6 @@
 # RJMCMC-CFR: Bayesian Changepoint Model for Time‑Varying CFR
 
-A research codebase for detecting changepoints in a time‑varying case fatality rate (CFR) using a Reversible‑Jump MCMC (RJMCMC) sampler with benchmarks (rtaCFR+PELT, rtaCFR+BinSeg). The repository includes simulation and real‑data notebooks as well as analysis scripts.
+A research codebase for detecting changepoints in a time‑varying case fatality rate (CFR) using a Reversible‑Jump MCMC (RJMCMC) sampler with benchmarks (PELT and BinSeg applied to rtaCFR signals). The repository includes simulation and real‑data notebooks as well as analysis scripts.
 
 ## Repository structure
 
@@ -9,16 +9,16 @@ A research codebase for detecting changepoints in a time‑varying case fatality
 ├── analysis.py                # Loads results, computes metrics, and generates publication figures/tables
 ├── config.py                  # Centralized configuration (paths, priors, grids, scenario definitions)
 ├── data_generation.py         # Simulation DGP: cases/deaths with delay convolution
-├── methods.py                 # RJMCMC sampler + rtaCFR fused‑lasso + PELT/BinSeg wrappers
+├── methods.py                 # RJMCMC sampler + rtaCFR signal estimator + PELT/BinSeg wrappers
 ├── evaluation_realdata.py     # Real‑data evaluation helpers
 ├── Realdata_Analysis_JP.ipynb # Real‑data pipeline (Japan)
 ├── Simulation_Analysis.ipynb  # Simulation pipeline
 ├── JP_Data.csv                # Real‑data CSV (Japan) used by the notebook(s)
 └── (auto‑created at runtime)
-    ├── results_cache/         # Cached rtaCFR signals
-    ├── results_sensitivity/   # Sensitivity study outputs
-    ├── results_main/          # Main simulation outputs
-    └── plots/                 # Figures exported by analysis.py
+    ├── rtacfr_cache/          # Cached rtaCFR signals
+    ├── results/sensitivity/   # Sensitivity study outputs
+    ├── results/main/          # Main simulation outputs
+    └── plots/                 # Figures and tables exported by analysis.py and notebooks
 ```
 
 > The notebooks call into the Python modules above. Path and hyperparameter knobs live in `config.py`.
@@ -59,8 +59,8 @@ Minimal path:
 ```bash
 # from repo root
 python - <<'PY'
-from analysis import main_analysis_workflow
-main_analysis_workflow()
+from analysis import full_analysis_workflow
+full_analysis_workflow()
 PY
 ```
 
@@ -86,7 +86,11 @@ Open `Realdata_Analysis_JP.ipynb` and run all cells. The notebook expects:
 
 Outputs:
 
-* Posterior summaries/figures to `plots/`
+* Posterior summaries/figures to `plots/`:
+  * `plots/japan_cases_and_deaths.pdf` - Epidemic wave visualization
+  * `plots/japan_cfr_comparison.pdf` - Method comparison plot
+  * `plots/real_data_evaluation_summary.csv` - Quantitative evaluation results
+  * `plots/real_data_evaluation_summary.tex` - LaTeX table of results
 
 * Optional cached signals to `results_cache/`
 
@@ -106,11 +110,9 @@ This script will:
 
   * `plots/publication_figure.pdf`
 
-  * `plots/sensitivity_analysis_heatmap.pdf`
+  * `plots/sensitivity_analysis_heatmap_grid.pdf`
 
-  * `plots/publication_summary_table.csv`
-
-  * `plots/sensitivity_analysis_table.csv`
+  * `plots/main_results_table.tex`
 
 If a directory is missing, the script will warn and exit cleanly.
 
@@ -134,4 +136,4 @@ A BibTeX entry will be provided in the project README once the preprint is publi
 
 ## License
 
-Specify your license (e.g., MIT, Apache‑2.0) at the repository root.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
