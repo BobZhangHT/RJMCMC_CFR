@@ -366,6 +366,7 @@ def _run_rtacfr_fusedlasso_internal(data):
 def get_rtacfr_signal(data, scenario_name, rep_idx):
     """Calculates the fused lasso signal, using a cache to avoid re-computation."""
     cache_file = os.path.join(SIGNAL_CACHE_DIR, f"signal_scen={scenario_name.replace(' ', '-')}_rep={rep_idx}.npz")
+    os.makedirs(SIGNAL_CACHE_DIR, exist_ok=True)
     if os.path.exists(cache_file):
         return np.load(cache_file)['signal']
     p_hat = _run_rtacfr_fusedlasso_internal(data)
