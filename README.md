@@ -131,7 +131,3 @@ If you use this repository or the ideas herein, please cite the accompanying man
 > *A Bayesian Changepoint Model for Time‑varying Case Fatality Rate via RJMCMC*, Zhang, Lee, and Qu (2025).
 
 A BibTeX entry will be provided in the project README once the preprint is public.
-
-## License
-
-Specify your license (e.g., MIT, Apache‑2.0) at the repository root.
