@@ -466,6 +466,301 @@ def generate_publication_figure(results_dir, optimal_params):
     plt.close(fig)
     print(f"Publication figure saved at: {save_path}")
 
+def generate_sensitivity_line_plots(df_sens):
+    """
+    Generates line plots showing sensitivity analysis results.
+    Each subplot shows how metrics vary with hyperparameters for different delay settings.
+    
+    Args:
+        df_sens (pd.DataFrame): The DataFrame from load_and_process_sensitivity_results.
+    """
+    delay_order = list(DELAY_DIST_SENSITIVITY.keys())
+    metrics = ['accuracy', 'hausdorff', 'mae']
+    metric_titles = ['Accuracy P(k_est = k_true)', 'Hausdorff Distance (HD)', 'Mean Absolute Error (MAE)']
+    
+    # Create a 3x5 subplot grid (3 metrics x 5 p_geom values)
+    fig, axes = plt.subplots(3, 5, figsize=(20, 12))
+    fig.suptitle(
+        'Sensitivity Analysis: Performance vs Hyperparameters',
+        fontsize=22,
+        fontweight='bold',
+        y=0.96
+    )
+    
+    p_geom_values = SENSITIVITY_GRID_PRIORS['PRIOR_K_GEOMETRIC_P']
+    theta_sigma_values = SENSITIVITY_GRID_PRIORS['PRIOR_THETA_SIGMA']
+    
+    # Define colors and markers for different delay settings
+    colors = ['tab:blue', 'tab:orange', 'tab:green']
+    markers = ['o', 's', '^']  # circle, square, triangle
+    
+    # Store handles and labels for a single legend
+    legend_handles = []
+    legend_labels = []
+    
+    for row, metric in enumerate(metrics):
+        for col, p_geom in enumerate(p_geom_values):
+            ax = axes[row, col]
+            
+            # Plot lines for each delay setting
+            for i, delay_name in enumerate(delay_order):
+                delay_df = df_sens[df_sens['delay_setting'] == delay_name]
+                
+                # Filter for current p_geom and get means across scenarios
+                p_geom_df = delay_df[delay_df['p_geom'] == p_geom]
+                metric_means = p_geom_df.groupby('theta_sigma')[metric].mean()
+                
+                line, = ax.plot(theta_sigma_values, 
+                       [metric_means.get(val, np.nan) for val in theta_sigma_values],
+                       marker=markers[i], linestyle='-', color=colors[i], 
+                       linewidth=2.5, markersize=7,
+                       label=delay_name, alpha=0.8)
+                
+                # Collect legend info only from first subplot
+                if row == 0 and col == 0:
+                    legend_handles.append(line)
+                    legend_labels.append(delay_name)
+            
+            # Only add title to top row (p_geom labels)
+            if row == 0:
+                ax.set_title(f'p_geom = {p_geom}', fontsize=14, fontweight='bold', pad=8)
+            
+            # Only add y-label to leftmost column
+            if col == 0:
+                ax.set_ylabel(metric_titles[row], fontsize=13, fontweight='bold')
+            else:
+                ax.set_ylabel('')
+            
+            # Only add x-label to bottom row
+            if row == 2:
+                ax.set_xlabel('θ_σ', fontsize=13, fontweight='bold')
+            else:
+                ax.set_xlabel('')
+            
+            ax.grid(True, alpha=0.3, linestyle=':', linewidth=1.0)
+            ax.tick_params(labelsize=11)
+            
+            # Set prominent black borders
+            for spine in ax.spines.values():
+                spine.set_edgecolor('black')
+                spine.set_linewidth(2.0)
+                spine.set_visible(True)
+    
+    # Add a single legend outside the plot area
+    fig.legend(legend_handles, legend_labels, 
+              loc='upper center', 
+              bbox_to_anchor=(0.5, 0.91),
+              ncol=3, 
+              fontsize=13, 
+              frameon=True, 
+              fancybox=True, 
+              shadow=True,
+              edgecolor='black',
+              framealpha=1.0)
+    
+    plt.tight_layout(rect=[0, 0.02, 1, 0.90])
+    save_path = os.path.join(PLOTS_DIR, "sensitivity_line_plots.pdf")
+    plt.savefig(save_path, dpi=400, bbox_inches='tight')
+    png_path = os.path.join(PLOTS_DIR, "sensitivity_line_plots.png")
+    plt.savefig(png_path, dpi=400, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Sensitivity line plots saved at: {save_path}")
+
+def generate_sensitivity_comparison_plot(df_sens):
+    """
+    Generates a comprehensive comparison plot showing the impact of delay misspecification.
+    
+    Args:
+        df_sens (pd.DataFrame): The DataFrame from load_and_process_sensitivity_results.
+    """
+    delay_order = list(DELAY_DIST_SENSITIVITY.keys())
+    metrics = ['accuracy', 'hausdorff', 'mae']
+    metric_titles = ['Accuracy', 'Hausdorff Distance', 'Mean Absolute Error']
+    
+    # Create a 2x2 subplot grid
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(
+        'Impact of Delay Misspecification on RJMCMC Performance',
+        fontsize=20,
+        fontweight='bold',
+        y=0.96
+    )
+    
+    # Define colors for different delay settings
+    colors = ['tab:blue', 'tab:orange', 'tab:green']
+    
+    # Plot 1: Accuracy comparison
+    ax = axes[0, 0]
+    for i, delay_name in enumerate(delay_order):
+        delay_df = df_sens[df_sens['delay_setting'] == delay_name]
+        accuracy_means = delay_df.groupby(['p_geom', 'theta_sigma'])['accuracy'].mean().reset_index()
+        mean_accuracy = accuracy_means['accuracy'].mean()
+        
+        ax.bar(i, mean_accuracy, color=colors[i], alpha=0.8, 
+               edgecolor='black', linewidth=1.5, 
+               label=f'{delay_name}\n(mean: {mean_accuracy:.3f})')
+    
+    ax.set_title('Mean Accuracy by Delay Setting', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Accuracy', fontsize=12, fontweight='bold')
+    ax.set_xticks(range(len(delay_order)))
+    ax.set_xticklabels([name.split()[0] for name in delay_order], rotation=45)
+    ax.grid(True, axis='y', alpha=0.3, linestyle=':')
+    ax.legend(fontsize=10, frameon=True, fancybox=True, shadow=True)
+    
+    # Plot 2: Hausdorff Distance comparison
+    ax = axes[0, 1]
+    for i, delay_name in enumerate(delay_order):
+        delay_df = df_sens[df_sens['delay_setting'] == delay_name]
+        hd_means = delay_df.groupby(['p_geom', 'theta_sigma'])['hausdorff'].mean().reset_index()
+        mean_hd = hd_means['hausdorff'].mean()
+        
+        ax.bar(i, mean_hd, color=colors[i], alpha=0.8, 
+               edgecolor='black', linewidth=1.5,
+               label=f'{delay_name}\n(mean: {mean_hd:.2f})')
+    
+    ax.set_title('Mean Hausdorff Distance by Delay Setting', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Hausdorff Distance', fontsize=12, fontweight='bold')
+    ax.set_xticks(range(len(delay_order)))
+    ax.set_xticklabels([name.split()[0] for name in delay_order], rotation=45)
+    ax.grid(True, axis='y', alpha=0.3, linestyle=':')
+    ax.legend(fontsize=10, frameon=True, fancybox=True, shadow=True)
+    
+    # Plot 3: MAE comparison
+    ax = axes[1, 0]
+    for i, delay_name in enumerate(delay_order):
+        delay_df = df_sens[df_sens['delay_setting'] == delay_name]
+        mae_means = delay_df.groupby(['p_geom', 'theta_sigma'])['mae'].mean().reset_index()
+        mean_mae = mae_means['mae'].mean()
+        
+        ax.bar(i, mean_mae, color=colors[i], alpha=0.8, 
+               edgecolor='black', linewidth=1.5,
+               label=f'{delay_name}\n(mean: {mean_mae:.3f})')
+    
+    ax.set_title('Mean Absolute Error by Delay Setting', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Mean Absolute Error', fontsize=12, fontweight='bold')
+    ax.set_xticks(range(len(delay_order)))
+    ax.set_xticklabels([name.split()[0] for name in delay_order], rotation=45)
+    ax.grid(True, axis='y', alpha=0.3, linestyle=':')
+    ax.legend(fontsize=10, frameon=True, fancybox=True, shadow=True)
+    
+    # Plot 4: Combined performance score
+    ax = axes[1, 1]
+    for i, delay_name in enumerate(delay_order):
+        delay_df = df_sens[df_sens['delay_setting'] == delay_name]
+        
+        # Normalize metrics to 0-1 scale and create combined score
+        accuracy_means = delay_df.groupby(['p_geom', 'theta_sigma'])['accuracy'].mean().reset_index()
+        hd_means = delay_df.groupby(['p_geom', 'theta_sigma'])['hausdorff'].mean().reset_index()
+        mae_means = delay_df.groupby(['p_geom', 'theta_sigma'])['mae'].mean().reset_index()
+        
+        # Normalize (higher is better for accuracy, lower is better for others)
+        mean_acc = accuracy_means['accuracy'].mean()
+        mean_hd = hd_means['hausdorff'].mean()
+        mean_mae = mae_means['mae'].mean()
+        
+        # Create combined score (higher is better)
+        combined_score = mean_acc - (mean_hd / 100) - (mean_mae / 10)
+        
+        ax.bar(i, combined_score, color=colors[i], alpha=0.8, 
+               edgecolor='black', linewidth=1.5,
+               label=f'{delay_name}\n(score: {combined_score:.3f})')
+    
+    ax.set_title('Combined Performance Score', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Combined Score', fontsize=12, fontweight='bold')
+    ax.set_xticks(range(len(delay_order)))
+    ax.set_xticklabels([name.split()[0] for name in delay_order], rotation=45)
+    ax.grid(True, axis='y', alpha=0.3, linestyle=':')
+    ax.legend(fontsize=10, frameon=True, fancybox=True, shadow=True)
+    
+    # Set prominent black borders for all subplots
+    for ax in axes.flat:
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(2.0)
+            spine.set_visible(True)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    save_path = os.path.join(PLOTS_DIR, "sensitivity_delay_comparison.pdf")
+    plt.savefig(save_path, dpi=400, bbox_inches='tight')
+    png_path = os.path.join(PLOTS_DIR, "sensitivity_delay_comparison.png")
+    plt.savefig(png_path, dpi=400, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Sensitivity delay comparison saved at: {save_path}")
+
+def generate_sensitivity_bar_plots(df_sens):
+    """
+    Generates bar plots showing the best hyperparameter combinations for each delay setting.
+    
+    Args:
+        df_sens (pd.DataFrame): The DataFrame from load_and_process_sensitivity_results.
+    """
+    delay_order = list(DELAY_DIST_SENSITIVITY.keys())
+    metrics = ['accuracy', 'hausdorff', 'mae']
+    
+    # Create a 1x3 subplot for each metric
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle(
+        'Best Hyperparameter Combinations by Delay Setting',
+        fontsize=20,
+        fontweight='bold',
+        y=0.98
+    )
+    
+    for col, metric in enumerate(metrics):
+        ax = axes[col]
+        
+        best_combinations = []
+        delay_names = []
+        
+        for delay_name in delay_order:
+            delay_df = df_sens[df_sens['delay_setting'] == delay_name]
+            
+            # Group by hyperparameters and average across scenarios
+            grouped = delay_df.groupby(['p_geom', 'theta_sigma'])[metric].mean().reset_index()
+            
+            # Find best combination (highest for accuracy, lowest for others)
+            if metric == 'accuracy':
+                best_idx = grouped[metric].idxmax()
+            else:
+                best_idx = grouped[metric].idxmin()
+            
+            best_combo = grouped.loc[best_idx]
+            best_combinations.append(best_combo[metric])
+            delay_names.append(delay_name)
+        
+        # Create bar plot
+        bars = ax.bar(delay_names, best_combinations, 
+                     color=['tab:blue', 'tab:orange', 'tab:green'], 
+                     alpha=0.8, edgecolor='black', linewidth=1.5)
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, best_combinations):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                   f'{value:.3f}', ha='center', va='bottom', 
+                   fontsize=11, fontweight='bold')
+        
+        # Customize subplot
+        ax.set_title(f'Best {metric.title()} by Delay Setting', 
+                    fontsize=14, fontweight='bold')
+        ax.set_ylabel(metric.title(), fontsize=12, fontweight='bold')
+        ax.grid(True, axis='y', alpha=0.3, linestyle=':')
+        ax.tick_params(axis='x', rotation=45)
+        
+        # Set prominent black borders
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(2.0)
+            spine.set_visible(True)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    save_path = os.path.join(PLOTS_DIR, "sensitivity_best_combinations.pdf")
+    plt.savefig(save_path, dpi=400, bbox_inches='tight')
+    png_path = os.path.join(PLOTS_DIR, "sensitivity_best_combinations.png")
+    plt.savefig(png_path, dpi=400, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Sensitivity best combinations saved at: {save_path}")
+
 def generate_sensitivity_heatmap_grid(df_sens):
     """
     Generates a 3x3 grid of heatmaps for the sensitivity analysis.
@@ -564,7 +859,12 @@ def full_analysis_workflow():
     
     # Stage 1: Analyze sensitivity results
     df_sens = load_and_process_sensitivity_results(SENSITIVITY_RESULTS_DIR)
-    generate_sensitivity_heatmap_grid(df_sens)
+    
+    # Generate multiple sensitivity visualizations
+    print("Generating sensitivity analysis visualizations...")
+    generate_sensitivity_heatmap_grid(df_sens)      # Original heatmap
+    generate_sensitivity_line_plots(df_sens)        # New: Line plots
+    
     optimal_params = find_optimal_hyperparameters(df_sens)
     
     # Stage 2: Analyze main simulation results
@@ -573,6 +873,9 @@ def full_analysis_workflow():
     generate_publication_figure(MAIN_RESULTS_DIR, optimal_params)
 
     print("\n--- Analysis Complete ---")
+    print("Generated sensitivity visualizations:")
+    print("  1. sensitivity_analysis_heatmap_grid.pdf (original heatmap)")
+    print("  2. sensitivity_line_plots.pdf (line plots)")
     return optimal_params
 
 if __name__ == "__main__":
