@@ -361,9 +361,9 @@ def generate_publication_figure(results_dir, optimal_params):
         ax = axes[i, 0]
         if all_k_est:  # Only plot if we have data
             sns.histplot(
-                all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.8,
-                edgecolor='white', linewidth=0.8, color='tab:blue',
-                alpha=0.8  # Add transparency for better visibility
+                all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.75,
+                edgecolor='black', linewidth=2.0, color='tab:blue',
+                alpha=0.9  # Higher opacity for better visibility
             )
         ax.set_title(f"Histogram of $\\hat{{k}}$\n{scenario_name}", fontsize=18, fontweight='bold')
         ax.set_xlim(0, K_MAX)
@@ -383,29 +383,20 @@ def generate_publication_figure(results_dir, optimal_params):
         ax = axes[i, 1]
         if true_cps:
             if all_taus_est:
-                # Use adaptive binning based on data range for better visibility
-                data_range = max(all_taus_est) - min(all_taus_est)
-                if data_range <= 5:
-                    # For very narrow ranges (single changepoint), use even fewer bins
-                    n_bins = max(5, data_range + 1)
-                elif data_range < 20:
-                    # For narrow ranges, use fewer bins to make histogram visible
-                    n_bins = max(10, data_range + 1)
-                else:
-                    # For wider ranges, use more bins but not too many
-                    n_bins = min(50, data_range + 1)
+                # Use fixed bin width for consistent appearance across all scenarios
+                # Bin width of 5 time units provides good visibility for all scenarios
+                bin_width = 5
+                min_tau = min(all_taus_est)
+                max_tau = max(all_taus_est)
                 
-                # For very narrow ranges, also use discrete binning
-                if data_range <= 5:
-                    # Use integer bins for discrete data
-                    bins = np.arange(min(all_taus_est) - 0.5, max(all_taus_est) + 1.5, 1)
-                else:
-                    bins = n_bins
+                # Create bins with consistent width across the x-axis range (0-200)
+                # Center bins around the data range for better visualization
+                bins = np.arange(0, 205, bin_width)  # 0, 5, 10, ..., 200
                 
                 sns.histplot(
                     all_taus_est, ax=ax, bins=bins, kde=False,
-                    edgecolor='white', linewidth=1.0, color='tab:purple',
-                    alpha=0.9,  # Higher opacity for better visibility
+                    edgecolor='black', linewidth=2.5, color='tab:purple',
+                    alpha=0.95,  # Even higher opacity for maximum visibility
                     stat='count'  # Use count instead of density
                 )
             for cp_idx, cp in enumerate(true_cps):
@@ -862,8 +853,8 @@ def full_analysis_workflow():
     
     # Generate multiple sensitivity visualizations
     print("Generating sensitivity analysis visualizations...")
-    generate_sensitivity_heatmap_grid(df_sens)      # Original heatmap
-    generate_sensitivity_line_plots(df_sens)        # New: Line plots
+    # generate_sensitivity_heatmap_grid(df_sens)      # Heatmap generation disabled
+    generate_sensitivity_line_plots(df_sens)        # Line plots
     
     optimal_params = find_optimal_hyperparameters(df_sens)
     
@@ -874,8 +865,7 @@ def full_analysis_workflow():
 
     print("\n--- Analysis Complete ---")
     print("Generated sensitivity visualizations:")
-    print("  1. sensitivity_analysis_heatmap_grid.pdf (original heatmap)")
-    print("  2. sensitivity_line_plots.pdf (line plots)")
+    print("  1. sensitivity_line_plots.pdf (line plots)")
     return optimal_params
 
 if __name__ == "__main__":
