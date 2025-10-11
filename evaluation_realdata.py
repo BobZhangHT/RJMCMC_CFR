@@ -25,12 +25,34 @@ def calculate_bic(deaths, cases, p_t_hat, k_est, delay_dist):
     """
     Computes the Bayesian Information Criterion (BIC) for a given CFR estimate.
     Lower BIC indicates a better balance of model fit and parsimony.
+    Uses the complete Poisson log-likelihood including the factorial term.
     """
+    from scipy.special import gammaln
+    
     T = len(deaths)
-    theta_t_hat = logit(np.clip(p_t_hat, 1e-9, 1 - 1e-9))
     delay_pmf = np.diff(delay_dist.cdf(np.arange(T + 1)))
     
-    log_likelihood = _calculate_log_likelihood(deaths, cases, theta_t_hat, delay_pmf, T)
+    # Calculate expected deaths
+    signal = cases * p_t_hat
+    expected_deaths = np.zeros(T)
+    for i in range(T):
+        for j in range(i + 1):
+            if j < len(delay_pmf):
+                expected_deaths[i] += signal[i - j] * delay_pmf[j]
+    
+    # Calculate complete Poisson log-likelihood including factorial term
+    log_likelihood = 0.0
+    for t in range(T):
+        mu = max(1e-9, expected_deaths[t])
+        d_t = deaths[t]
+        
+        # Standard Poisson log-likelihood: d_t * log(mu) - mu - log(d_t!)
+        if d_t == 0:
+            log_factorial = 0.0  # log(0!) = log(1) = 0
+        else:
+            log_factorial = gammaln(d_t + 1)  # log(d_t!)
+        
+        log_likelihood += d_t * np.log(mu) - mu - log_factorial
     
     # Number of parameters = k changepoints + (k+1) segment levels
     num_params = k_est + (k_est + 1)

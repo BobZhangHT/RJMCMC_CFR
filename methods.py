@@ -54,6 +54,8 @@ def _calculate_log_likelihood(deaths, cases, theta_t, delay_pmf, T):
     log_lik = 0.0
     for t in range(T):
         mu = max(1e-9, expected_deaths[t]) # Ensure mu is positive
+        # Standard Poisson log-likelihood: deaths[t] * log(mu) - mu - log(deaths[t]!)
+        # We can ignore the factorial term as it's constant across models for BIC comparison
         log_lik += deaths[t] * np.log(mu) - mu
     return log_lik
 

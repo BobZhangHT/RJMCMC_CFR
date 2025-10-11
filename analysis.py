@@ -25,14 +25,19 @@ from config import (SENSITIVITY_RESULTS_DIR, MAIN_RESULTS_DIR, PLOTS_DIR,
 # --- Global plotting style for publication-quality figures ---
 sns.set_theme(context='talk', style='whitegrid')
 plt.rcParams.update({
-    'font.size': 12,
+    'font.size': 14,
     'axes.titlesize': 18,
     'axes.labelsize': 16,
-    'legend.fontsize': 12,
+    'legend.fontsize': 14,
     'xtick.labelsize': 12,
     'ytick.labelsize': 12,
-    'axes.linewidth': 1.2,
-    'lines.linewidth': 2.0
+    'axes.linewidth': 2.5,  # Increase border width
+    'axes.edgecolor': 'black',  # Set border color to black
+    'lines.linewidth': 2.5,
+    'figure.dpi': 300,
+    'savefig.dpi': 400,
+    'savefig.bbox': 'tight',
+    'savefig.pad_inches': 0.1
 })
 
 # ==============================================================================
@@ -308,18 +313,9 @@ def generate_publication_figure(results_dir, optimal_params):
     # Larger canvas, clearer default styles for publication
     fig, axes = plt.subplots(
         len(SCENARIOS), 3,
-        figsize=(22, 26),
+        figsize=(24, 28),
         gridspec_kw={'width_ratios': [1, 1, 2]}
     )
-    plt.rcParams.update({
-        'font.size': 12,
-        'axes.titlesize': 18,
-        'axes.labelsize': 16,
-        'legend.fontsize': 12,
-        'xtick.labelsize': 12,
-        'ytick.labelsize': 12,
-        'axes.linewidth': 1.2
-    })
     scenario_order = list(SCENARIOS.keys())
 
     for i, scenario_name in enumerate(scenario_order):
@@ -363,34 +359,74 @@ def generate_publication_figure(results_dir, optimal_params):
         
         # --- Column 1: Histogram of Posterior Mode k ---
         ax = axes[i, 0]
-        sns.histplot(
-            all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.8,
-            edgecolor='white', linewidth=0.8, color='tab:blue'
-        )
-        ax.set_title(f"Histogram of $\\hat{{k}}$\n{scenario_name}")
+        if all_k_est:  # Only plot if we have data
+            sns.histplot(
+                all_k_est, ax=ax, discrete=True, stat='probability', shrink=0.8,
+                edgecolor='white', linewidth=0.8, color='tab:blue',
+                alpha=0.8  # Add transparency for better visibility
+            )
+        ax.set_title(f"Histogram of $\\hat{{k}}$\n{scenario_name}", fontsize=18, fontweight='bold')
         ax.set_xlim(0, K_MAX)
-        ax.set_xlabel("Estimated Number of Changepoints ($\\hat{k}$)")
+        ax.set_xlabel("Estimated Number of Changepoints ($\\hat{k}$)", fontsize=16)
+        ax.set_ylabel("Probability", fontsize=16)
         ax.grid(True, axis='y', linestyle=':', alpha=0.5)
-        ax.axvline(len(true_cps), color='red', linestyle='--', linewidth=2,
+        ax.axvline(len(true_cps), color='red', linestyle='--', linewidth=2.5,
                    label=f'True k={len(true_cps)}')
-        ax.legend(frameon=False)
+        ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=14)
+        # Set prominent black borders for all spines
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(2.5)
+            spine.set_visible(True)
 
         # --- Column 2: Histogram of Estimated Changepoint Locations ---
         ax = axes[i, 1]
         if true_cps:
             if all_taus_est:
+                # Use adaptive binning based on data range for better visibility
+                data_range = max(all_taus_est) - min(all_taus_est)
+                if data_range <= 5:
+                    # For very narrow ranges (single changepoint), use even fewer bins
+                    n_bins = max(5, data_range + 1)
+                elif data_range < 20:
+                    # For narrow ranges, use fewer bins to make histogram visible
+                    n_bins = max(10, data_range + 1)
+                else:
+                    # For wider ranges, use more bins but not too many
+                    n_bins = min(50, data_range + 1)
+                
+                # For very narrow ranges, also use discrete binning
+                if data_range <= 5:
+                    # Use integer bins for discrete data
+                    bins = np.arange(min(all_taus_est) - 0.5, max(all_taus_est) + 1.5, 1)
+                else:
+                    bins = n_bins
+                
                 sns.histplot(
-                    all_taus_est, ax=ax, bins=T, kde=False,
-                    edgecolor='white', linewidth=0.6, color='tab:purple'
+                    all_taus_est, ax=ax, bins=bins, kde=False,
+                    edgecolor='white', linewidth=1.0, color='tab:purple',
+                    alpha=0.9,  # Higher opacity for better visibility
+                    stat='count'  # Use count instead of density
                 )
             for cp_idx, cp in enumerate(true_cps):
-                ax.axvline(cp, color='red', linestyle='--', linewidth=2,
+                ax.axvline(cp, color='red', linestyle='--', linewidth=2.5,
                            label='True CP' if cp_idx == 0 else "")
-            ax.legend(frameon=False)
+            ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=14)
         else:
-            ax.set_xlim(0, T) # Keep plot blank for K=0 scenario
-        ax.set_title("Histogram of Estimated CPs"); ax.set_xlabel("Time (t)"); ax.set_ylabel("Count")
+            ax.set_xlim(0, 200) # Keep plot blank for K=0 scenario, fixed range
+        
+        # Always set x-axis range to 0-200 regardless of scenario
+        ax.set_xlim(0, 200)
+        ax.set_title("Histogram of Estimated CPs", fontsize=18, fontweight='bold')
+        ax.set_xlabel("Time (t)", fontsize=16)
+        ax.set_ylabel("Count", fontsize=16)
         ax.grid(True, axis='y', linestyle=':', alpha=0.5)
+        
+        # Set prominent black borders for all spines
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(2.5)
+            spine.set_visible(True)
 
         # --- Column 3: Averaged CFR Estimate ---
         ax = axes[i, 2]
@@ -398,22 +434,28 @@ def generate_publication_figure(results_dir, optimal_params):
             avg_p_t_mean = np.mean(np.vstack(all_p_t_means), axis=0)
             avg_p_t_lower = np.mean(np.vstack(all_p_t_lowers), axis=0)
             avg_p_t_upper = np.mean(np.vstack(all_p_t_uppers), axis=0)
-            ax.plot(avg_p_t_mean, color='dodgerblue', linewidth=2.5, label='RJMCMC Avg. Mean Estimate')
+            ax.plot(avg_p_t_mean, color='dodgerblue', linewidth=3, label='RJMCMC Avg. Mean Estimate')
             ax.fill_between(range(T), avg_p_t_lower, avg_p_t_upper,
                             color='skyblue', alpha=0.35,
                             label='RJMCMC Avg. 95% CrI')
 
         if rtacfr_p_t_runs:
             avg_rtacfr_p_t = np.mean(np.vstack(rtacfr_p_t_runs), axis=0)
-            ax.plot(avg_rtacfr_p_t, color='green', linestyle='--', lw=2.5,
+            ax.plot(avg_rtacfr_p_t, color='green', linestyle='--', lw=3,
                     label='rtaCFR Avg. Estimate')
         
         ax.plot(true_p_t, color='black', lw=3, label='True CFR')
-        ax.set_title("Averaged CFR Estimate");
-        ax.set_xlabel("Time (t)"); ax.set_ylabel("Fatality Rate");
+        ax.set_title("Averaged CFR Estimate", fontsize=18, fontweight='bold')
+        ax.set_xlabel("Time (t)", fontsize=16)
+        ax.set_ylabel("Fatality Rate", fontsize=16)
         ax.set_ylim(bottom=0)
         ax.grid(True, linestyle=':', alpha=0.4)
-        ax.legend(frameon=False)
+        ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=14)
+        # Set prominent black borders for all spines
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(2.5)
+            spine.set_visible(True)
 
     plt.tight_layout(h_pad=3)
     save_path = os.path.join(PLOTS_DIR, "publication_figure.pdf")
@@ -441,10 +483,11 @@ def generate_sensitivity_heatmap_grid(df_sens):
     metric_vmax = {m: np.nanmax(df_sens[m]) for m in metrics}
 
     # Larger canvas for publication and bigger base fonts
-    fig, axes = plt.subplots(3, 3, figsize=(24, 20))
+    fig, axes = plt.subplots(3, 3, figsize=(26, 22))
     fig.suptitle(
         'Sensitivity of RJMCMC Performance to Priors and Delay Misspecification',
-        fontsize=26,
+        fontsize=28,
+        fontweight='bold',
         y=0.995
     )
 
@@ -469,10 +512,10 @@ def generate_sensitivity_heatmap_grid(df_sens):
                 annot=True,
                 fmt=".2f",
                 cmap="viridis",
-                linewidths=1.0,
+                linewidths=1.5,
                 linecolor='white',
                 cbar_kws={'shrink': 0.9},
-                annot_kws={'fontsize': 12},
+                annot_kws={'fontsize': 14, 'fontweight': 'bold'},
                 vmin=metric_vmin[metric],
                 vmax=metric_vmax[metric],
                 square=True
@@ -480,22 +523,31 @@ def generate_sensitivity_heatmap_grid(df_sens):
             
             # Set titles and labels for clarity
             if row == 0:
-                ax.set_title(metric_titles[col], fontsize=18)
+                ax.set_title(metric_titles[col], fontsize=20, fontweight='bold', pad=10)
             if col == 0:
-                ax.set_ylabel(delay_name, fontsize=16)
+                ax.set_ylabel(delay_name, fontsize=18, fontweight='bold')
             else:
                 ax.set_ylabel('')
 
-            ax.set_xlabel('p_geom', fontsize=16)
-            ax.set_xticklabels(p_geom_labels, rotation=0, fontsize=12)
-            ax.set_yticklabels(theta_sigma_labels, rotation=0, fontsize=12)
-            ax.tick_params(axis='both', labelsize=12)
+            ax.set_xlabel('p_geom', fontsize=18, fontweight='bold')
+            ax.set_xticklabels(p_geom_labels, rotation=0, fontsize=14)
+            ax.set_yticklabels(theta_sigma_labels, rotation=0, fontsize=14)
+            ax.tick_params(axis='both', labelsize=14)
+
+            # Set prominent black borders for all spines
+            for spine in ax.spines.values():
+                spine.set_edgecolor('black')
+                spine.set_linewidth(2.5)
+                spine.set_visible(True)
 
             # Enlarge colorbar tick labels
             if heat.collections:
                 cbar = heat.collections[0].colorbar
                 if cbar is not None:
-                    cbar.ax.tick_params(labelsize=12)
+                    cbar.ax.tick_params(labelsize=14)
+                    # Add border to colorbar
+                    cbar.outline.set_edgecolor('black')
+                    cbar.outline.set_linewidth(2.5)
 
     # Improve layout spacing; export high-res PDF and PNG
     plt.tight_layout(rect=[0, 0, 1, 0.965])
