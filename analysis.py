@@ -524,7 +524,7 @@ def generate_sensitivity_line_plots(df_sens):
             
             # Only add x-label to bottom row
             if row == 2:
-                ax.set_xlabel('θ_σ', fontsize=13, fontweight='bold')
+                ax.set_xlabel('$\\theta_0$', fontsize=13, fontweight='bold')
             else:
                 ax.set_xlabel('')
             
