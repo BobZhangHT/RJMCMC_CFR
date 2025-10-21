@@ -1,139 +1,103 @@
-# RJMCMC-CFR: Bayesian Changepoint Model for Time‑Varying CFR
+# RJMCMC-CFR: Bayesian Changepoint Detection for Time-Varying Case Fatality Rate
 
-A research codebase for detecting changepoints in a time‑varying case fatality rate (CFR) using a Reversible‑Jump MCMC (RJMCMC) sampler with benchmarks (PELT and BinSeg applied to rtaCFR signals). The repository includes simulation and real‑data notebooks as well as analysis scripts.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Repository structure
+## Overview
 
-```
-.
-├── analysis.py                # Loads results, computes metrics, and generates publication figures/tables
-├── config.py                  # Centralized configuration (paths, priors, grids, scenario definitions)
-├── data_generation.py         # Simulation DGP: cases/deaths with delay convolution
-├── methods.py                 # RJMCMC sampler + rtaCFR signal estimator + PELT/BinSeg wrappers
-├── evaluation_realdata.py     # Real‑data evaluation helpers
-├── Realdata_Analysis_JP.ipynb # Real‑data pipeline (Japan)
-├── Simulation_Analysis.ipynb  # Simulation pipeline
-├── JP_Data.csv                # Real‑data CSV (Japan) used by the notebook(s)
-└── (auto‑created at runtime)
-    ├── rtacfr_cache/          # Cached rtaCFR signals
-    ├── results/sensitivity/   # Sensitivity study outputs
-    ├── results/main/          # Main simulation outputs
-    └── plots/                 # Figures and tables exported by analysis.py and notebooks
-```
+This repository implements a Bayesian changepoint model for detecting temporal changes in disease case fatality rate (CFR) using Reversible-Jump Markov Chain Monte Carlo (RJMCMC). The method is benchmarked against PELT and Binary Segmentation applied to real-time adjusted CFR (rtaCFR) signals.
 
-> The notebooks call into the Python modules above. Path and hyperparameter knobs live in `config.py`.
+**Key Features:**
+- Flexible Bayesian framework for unknown number of changepoints
+- Accounts for reporting delays between cases and deaths
+- Comprehensive simulation study and real-data validation
+- Reproducible analysis pipeline
 
-## Installation (lightweight)
+## Installation
 
-Tested with Python ≥ 3.9. Create and activate a fresh environment, then install requirements:
+**Requirements:** Python ≥ 3.9
 
 ```bash
+# Create virtual environment
 python -m venv .venv
-# Linux/macOS
-source .venv/bin/activate
-# Windows
-# .venv\Scripts\activate
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
+# Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-**Note on solvers:** `cvxpy` defaults to ECOS for this project. The wheel for `ecos` is included in `requirements.txt`.
+## Repository Structure
 
-**Optional speed‑ups:** If you plan to run long simulations, consider enabling the Numba JIT decoration for the inner sampler in `methods.py` (comment explains how).
-
-## Quickstart
-
-### 1) Simulations (end‑to‑end)
-
-The notebook `Simulation_Analysis.ipynb` runs:
-
-1. **Sensitivity analysis** over prior hyperparameters for RJMCMC (writes to `results/sensitivity/`).
-
-2. **Main experiments** with the optimal hyperparameters (writes to `results/main/`).
-
-3. **Figures & tables** via `analysis.py` (written to `plots/`).
-
-Minimal path:
-
-```bash
-# from repo root
-python - <<'PY'
-from analysis import full_analysis_workflow
-full_analysis_workflow()
-PY
+```
+├── methods.py                 # RJMCMC sampler and comparison methods
+├── data_generation.py         # Simulation data generation
+├── analysis.py                # Analysis and visualization
+├── config.py                  # Hyperparameters and settings
+├── Simulation_Analysis.ipynb  # Main simulation experiments
+├── Realdata_Analysis_JP.ipynb # Real-data analysis (Japan COVID-19)
+├── JP_Data.csv                # Japan epidemic data
+├── results/                   # Simulation outputs
+└── plots/                     # Generated figures and tables
 ```
 
-Or open the notebook and run all cells.
+## Reproducing Results
 
-Key knobs live in `config.py`:
+### Simulation Study
 
-* `SENSITIVITY_GRID` for prior sweeps
+Run the complete simulation pipeline:
 
-* `SCENARIOS` for DGPs
+```bash
+# Option 1: Via Python script
+python -c "from analysis import full_analysis_workflow; full_analysis_workflow()"
 
-* `MCMC_ITER`, `MCMC_BURN_IN`, `K_MAX` for the RJMCMC loop
+# Option 2: Via Jupyter notebook
+jupyter notebook Simulation_Analysis.ipynb
+```
 
-* Output directories (`results_*`, `plots/`)
+This generates:
+- Sensitivity analysis over prior specifications
+- Performance comparison across scenarios
+- Publication-ready figures: `plots/publication_figure.pdf`
+- Results table: `plots/main_results_table.tex`
 
-### 2) Real‑data (Japan)
+### Real-Data Analysis
 
-Open `Realdata_Analysis_JP.ipynb` and run all cells. The notebook expects:
+Apply the method to Japan COVID-19 data:
 
-* `JP_Data.csv` (cases/deaths; paths handled in the notebook)
-
-* The model components from `methods.py`
+```bash
+jupyter notebook Realdata_Analysis_JP.ipynb
+```
 
 Outputs:
+- `plots/japan_cfr_comparison.pdf` - Method comparison
+- `plots/real_data_evaluation_summary.tex` - Performance metrics
 
-* Posterior summaries/figures to `plots/`:
-  * `plots/japan_cases_and_deaths.pdf` - Epidemic wave visualization
-  * `plots/japan_cfr_comparison.pdf` - Method comparison plot
-  * `plots/real_data_evaluation_summary.csv` - Quantitative evaluation results
-  * `plots/real_data_evaluation_summary.tex` - LaTeX table of results
+## Configuration
 
-* Optional cached signals to `rtacfr_cache/`
-
-## Reproducing figures & tables
-
-`analysis.py` provides the batch workflow used for the paper‑style figures:
-
-```bash
-python analysis.py
-```
-
-This script will:
-
-* Load summaries from `results/sensitivity/` and derive the baseline priors
-
-* Load `results/main/`, aggregate metrics, and export:
-
-  * `plots/publication_figure.pdf`
-
-  * `plots/sensitivity_analysis_heatmap_grid.pdf`
-
-  * `plots/main_results_table.tex`
-
-If a directory is missing, the script will warn and exit cleanly.
-
-## Notes & tips
-
-* **Determinism:** A global `SEED` is defined in `config.py` and is offset by replication indices where appropriate.
-
-* **Caching:** rtaCFR signals are cached per scenario/rep in `rtacfr_cache/` to avoid recomputation.
-
-* **Numba:** The JIT-accelerated helpers are in `methods.py`. The main RJMCMC loop can be toggled to JIT if you are not using multiprocessing.
-
-* **Memory use:** `analysis.py` loads only summaries (not full posterior arrays) for aggregation to keep memory usage modest.
+Key parameters in `config.py`:
+- `MCMC_ITER`, `MCMC_BURN_IN`: MCMC sampling settings
+- `K_MAX`: Maximum number of changepoints
+- `SENSITIVITY_GRID`: Prior hyperparameter ranges
+- `SCENARIOS`: Simulation scenario definitions
 
 ## Citation
 
-If you use this repository or the ideas herein, please cite the accompanying manuscript:
+If you use this code, please cite:
 
-> *A Bayesian Changepoint Model for Time‑varying Case Fatality Rate via RJMCMC*, Zhang, Lee, and Qu (2025).
-
-A BibTeX entry will be provided in the project README once the preprint is public.
+```bibtex
+@article{zhang2025rjmcmc,
+  title={A Bayesian Changepoint Model for Time-varying Case Fatality Rate via RJMCMC},
+  author={Zhang, Hengtao and Lee, Chun Yin and Qu, Yuanke},
+  journal={[Journal Name]},
+  year={2025},
+  note={Manuscript in preparation}
+}
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+
+## Contact
+
+For questions or issues, please open an issue on GitHub or contact the authors.
