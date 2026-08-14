@@ -6,5 +6,8 @@
 /.ipynb_checkpoints
 /__pycache__
 
+/paper
+/reviewer
+
 *.PDF
 *.ipynb
