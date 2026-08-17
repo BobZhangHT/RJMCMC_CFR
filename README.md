@@ -1,103 +1,147 @@
-# RJMCMC-CFR: Bayesian Changepoint Detection for Time-Varying Case Fatality Rate
+# RJMCMC-CFR
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+Bayesian changepoint inference for a time-varying reported-case fatality rate
+(CFR). Daily deaths are modeled through a convolution of observed case counts,
+a case-to-death delay distribution, and a piecewise-constant latent CFR.
 
-## Overview
+## Contents
 
-This repository implements a Bayesian changepoint model for detecting temporal changes in disease case fatality rate (CFR) using Reversible-Jump Markov Chain Monte Carlo (RJMCMC). The method is benchmarked against PELT and Binary Segmentation applied to real-time adjusted CFR (rtaCFR) signals.
+```text
+methods.py                 Canonical RJMCMC entry point and benchmark methods
+rjmcmc_c.c                 Optional compiled C sampler backend
+Simulation_Analysis.py     Parallel and resumable simulation workflow
+Realdata_Analysis_JP.py    Parallel and resumable Japan analysis
+workflow_runtime.py        Checkpoints, deterministic seeds, and progress bars
+analysis.py                Simulation summaries, tables, and figures
+evaluation_realdata.py     Real-data evaluation metrics
+data_generation.py         Simulation data generation
+config.py                  Default model and workflow settings
+JP_Data.csv                Japan case and death data used by the workflow
+events.csv                 Contextual Japan event dates
+tests/                     Backend and workflow consistency tests
+```
 
-**Key Features:**
-- Flexible Bayesian framework for unknown number of changepoints
-- Accounts for reporting delays between cases and deaths
-- Comprehensive simulation study and real-data validation
-- Reproducible analysis pipeline
+Generated results, caches, figures, compiled extensions, manuscripts, and local
+archives are intentionally excluded from Git.
 
 ## Installation
 
-**Requirements:** Python ≥ 3.9
+Python 3.9 or newer is required.
 
 ```bash
-# Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
 ```
 
-## Repository Structure
-
-```
-├── methods.py                 # RJMCMC sampler and comparison methods
-├── data_generation.py         # Simulation data generation
-├── analysis.py                # Analysis and visualization
-├── config.py                  # Hyperparameters and settings
-├── Simulation_Analysis.ipynb  # Main simulation experiments
-├── Realdata_Analysis_JP.ipynb # Real-data analysis (Japan COVID-19)
-├── JP_Data.csv                # Japan epidemic data
-├── results/                   # Simulation outputs
-└── plots/                     # Generated figures and tables
-```
-
-## Reproducing Results
-
-### Simulation Study
-
-Run the complete simulation pipeline:
+Activate the environment, then install the dependencies:
 
 ```bash
-# Option 1: Via Python script
-python -c "from analysis import full_analysis_workflow; full_analysis_workflow()"
-
-# Option 2: Via Jupyter notebook
-jupyter notebook Simulation_Analysis.ipynb
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-This generates:
-- Sensitivity analysis over prior specifications
-- Performance comparison across scenarios
-- Publication-ready figures: `plots/publication_figure.pdf`
-- Results table: `plots/main_results_table.tex`
-
-### Real-Data Analysis
-
-Apply the method to Japan COVID-19 data:
+The NumPy/Numba backend runs without a compiler. To build the optional C
+backend in place:
 
 ```bash
-jupyter notebook Realdata_Analysis_JP.ipynb
+python setup.py build_ext --inplace
 ```
 
-Outputs:
-- `plots/japan_cfr_comparison.pdf` - Method comparison
-- `plots/real_data_evaluation_summary.tex` - Performance metrics
+On Windows, a configured MSVC Build Tools installation or MinGW compiler is
+required for the extension build.
 
-## Configuration
+```bash
+python setup.py build_ext --inplace --compiler=mingw32
+```
 
-Key parameters in `config.py`:
-- `MCMC_ITER`, `MCMC_BURN_IN`: MCMC sampling settings
-- `K_MAX`: Maximum number of changepoints
-- `SENSITIVITY_GRID`: Prior hyperparameter ranges
-- `SCENARIOS`: Simulation scenario definitions
+## Sampler API
 
-## Citation
+Both analysis workflows call the same canonical function:
 
-If you use this code, please cite:
+```python
+from methods import run_rjmcmc
 
-```bibtex
-@article{zhang2025rjmcmc,
-  title={A Bayesian Changepoint Model for Time-varying Case Fatality Rate via RJMCMC},
-  author={Zhang, Hengtao and Lee, Chun Yin and Qu, Yuanke},
-  journal={[Journal Name]},
-  year={2025},
-  note={Manuscript in preparation}
-}
+result = run_rjmcmc(data, backend="numba", seed=2025)
+```
+
+Supported backend values are:
+
+- `numba`: portable NumPy/Numba implementation.
+- `c`: compiled extension; raises a build hint when unavailable.
+- `auto`: uses the compiled extension when available and otherwise uses Numba.
+
+The random streams of the backends are independent. Their agreement is tested
+statistically through posterior changepoint-count, inclusion-probability, and
+CFR summaries rather than draw-for-draw identity.
+
+## Simulation Workflow
+
+Run the complete simulation, analysis, and plotting pipeline:
+
+```bash
+python Simulation_Analysis.py --stage all --workers 8 --backend auto
+```
+
+Useful focused stages include:
+
+```bash
+python Simulation_Analysis.py --stage diagnostics --workers 4 --backend auto
+python Simulation_Analysis.py --stage benchmark-delay --benchmark-delay-reps 100 --workers 8
+python Simulation_Analysis.py --stage sensitivity --workers 8 --backend auto
+```
+
+## Japan Workflow
+
+Run the real-data analysis:
+
+```bash
+python Realdata_Analysis_JP.py --workers 8 --backend auto
+```
+
+Run the convergence diagnostics and prior-sensitivity jobs without repeating
+the benchmark fits:
+
+```bash
+python Realdata_Analysis_JP.py --reviewer-only --workers 4 --backend auto
+```
+
+## Checkpoints and Outputs
+
+Each independent task writes an atomic checkpoint under `results/`. Repeating
+the same command resumes completed tasks by default. Use `--no-resume` to
+recompute them. Parallel stages use process workers and display progress bars.
+
+Use `--results-root` and `--plots-dir` to place generated artifacts elsewhere:
+
+```bash
+python Simulation_Analysis.py --stage diagnostics \
+  --results-root results/diagnostics --plots-dir plots/diagnostics
+```
+
+Neither checkpoints nor generated plots are tracked by Git.
+
+## Verification
+
+Run the portable test suite:
+
+```bash
+python -m pytest -q
+```
+
+After building the C extension, run the same command again to include the
+cross-backend statistical consistency tests.
+
+For quick workflow checks:
+
+```bash
+python Simulation_Analysis.py --smoke --workers 1 --backend numba
+python Realdata_Analysis_JP.py --smoke --workers 1 --backend numba
 ```
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+This project is released under the [MIT License](LICENSE).
 
-## Contact
+## Citation
 
-For questions or issues, please open an issue on GitHub or contact the authors.
+Please cite the accompanying manuscript when using this code. Publication
+metadata will be added here when the article record is available.

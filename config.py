@@ -15,9 +15,9 @@ from scipy.special import logit
 # --- Simulation Parameters ---
 # ==============================================================================
 # Replications for the main study, run after sensitivity analysis
-N_REPLICATIONS = 10
+N_REPLICATIONS = 500
 # Replications for the sensitivity analysis (fewer runs for speed)
-SENSITIVITY_REPLICATIONS = 5
+SENSITIVITY_REPLICATIONS = 100
 # Length of the time series for each simulated dataset
 T = 200
 # Global random seed for reproducibility
@@ -44,15 +44,16 @@ K_MAX = 10
 # Default priors - will be overridden by sensitivity analysis or optimal values
 PRIOR_K_GEOMETRIC_P = 0.9
 PRIOR_THETA_MU = -3.5
-PRIOR_THETA_SIGMA = 1.0
+PRIOR_THETA_SIGMA = 1.5
 
 REAL_DATA_PRIOR_K_GEOMETRIC_P = 0.9
-REAL_DATA_PRIOR_THETA_SIGMA = 1.0
+REAL_DATA_PRIOR_THETA_SIGMA = 1.5
 
 # Proposal distribution variances for the MCMC updates
 PROPOSAL_U_SIGMA = 0.5
 PROPOSAL_THETA_SIGMA = 0.5
 PROPOSAL_MOVE_WINDOW = 5
+REAL_DATA_PROPOSAL_THETA_SIGMA = 0.2
 
 # ==============================================================================
 # --- Benchmark Method Configuration ---

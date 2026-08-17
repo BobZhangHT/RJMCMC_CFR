@@ -154,7 +154,7 @@ def load_and_process_sensitivity_results(results_dir):
         })
     return pd.DataFrame(all_results)
 
-def load_and_process_main_results(results_dir):
+def load_and_process_main_results(results_dir, optimal_params=None):
     """
     Loads and processes all result files from the main simulation directory.
     It computes metrics for all methods (RJMCMC and benchmarks).
@@ -171,6 +171,19 @@ def load_and_process_main_results(results_dir):
         filepath = os.path.join(results_dir, fname)
         with open(filepath, 'rb') as f:
             res = pickle.load(f)
+        if optimal_params is not None:
+            params = res.get('params', {})
+            if not (
+                np.isclose(
+                    params.get('PRIOR_K_GEOMETRIC_P', np.nan),
+                    optimal_params['PRIOR_K_GEOMETRIC_P'],
+                )
+                and np.isclose(
+                    params.get('PRIOR_THETA_SIGMA', np.nan),
+                    optimal_params['PRIOR_THETA_SIGMA'],
+                )
+            ):
+                continue
         true_cps, true_k, true_p_t = res['data']['true_cps'], len(res['data']['true_cps']), res['data']['true_p_t']
         methods = {'RJMCMC': res.get('rjmcmc', {}), 'rtaCFR': res.get('rtacfr', {}), 'Pelt': res.get('pelt', {}), 'BinSeg': res.get('binseg', {})}
         for name, method_res in methods.items():
@@ -325,14 +338,19 @@ def generate_publication_figure(results_dir, optimal_params):
         rtacfr_p_t_runs = []
         true_p_t, true_cps = None, None
 
-        # Find all result files for the current scenario that used optimal parameters
-        fnames = [f for f in os.listdir(results_dir) if scenario_name.replace(' ', '_') in f]
+        # Filter by stored metadata instead of depending on a filename convention.
+        fnames = [f for f in os.listdir(results_dir) if f.endswith('.pkl')]
         for fname in fnames:
             p_opt = optimal_params['PRIOR_K_GEOMETRIC_P']
             s_opt = optimal_params['PRIOR_THETA_SIGMA']
-            if f"p{p_opt}" in fname and f"s{s_opt}" in fname:
-                with open(os.path.join(results_dir, fname), 'rb') as f:
-                    res = pickle.load(f)
+            with open(os.path.join(results_dir, fname), 'rb') as f:
+                res = pickle.load(f)
+            params = res.get('params', {})
+            if (
+                res.get('scenario') == scenario_name
+                and np.isclose(params.get('PRIOR_K_GEOMETRIC_P', np.nan), p_opt)
+                and np.isclose(params.get('PRIOR_THETA_SIGMA', np.nan), s_opt)
+            ):
                 
                 # Collect summarized RJMCMC statistics from each run
                 rjmcmc_res = res.get('rjmcmc', {})
@@ -342,20 +360,13 @@ def generate_publication_figure(results_dir, optimal_params):
                 all_p_t_lowers.append(rjmcmc_res.get('p_t_lower_ci', np.full(T, np.nan)))
                 all_p_t_uppers.append(rjmcmc_res.get('p_t_upper_ci', np.full(T, np.nan)))
                 
-                # Load the corresponding raw rtaCFR signal from its cache
-                match = re.search(r'_rep(\d+)', fname)
-                if match:
-                    rep_idx = int(match.group(1))
-                    scen_fname = scenario_name.replace(" ", "-")
-                    cache_file = os.path.join(SIGNAL_CACHE_DIR, f"signal_scen={scen_fname}_rep={rep_idx}.npz")
-                    if os.path.exists(cache_file):
-                        with np.load(cache_file) as loaded_data:
-                            rtacfr_p_t_runs.append(loaded_data['signal'])
-                    else:
-                        print(f"Warning: Cache file not found: {cache_file}")
+                rtacfr_signal = res.get('rtacfr', {}).get('p_t_hat')
+                if rtacfr_signal is not None:
+                    rtacfr_p_t_runs.append(rtacfr_signal)
 
                 if true_p_t is None:
-                    true_p_t, true_cps = res['data']['true_p_t'], res['data']['true_cps']
+                    true_p_t = res['data']['true_p_t']
+                    true_cps = res['data'].get('true_cps') or []
         
         # --- Column 1: Histogram of Posterior Mode k ---
         ax = axes[i, 0]
@@ -428,7 +439,7 @@ def generate_publication_figure(results_dir, optimal_params):
             ax.plot(avg_p_t_mean, color='dodgerblue', linewidth=3, label='RJMCMC Avg. Mean Estimate')
             ax.fill_between(range(T), avg_p_t_lower, avg_p_t_upper,
                             color='skyblue', alpha=0.35,
-                            label='RJMCMC Avg. 95% CrI')
+                            label='Mean 2.5%-97.5% posterior quantiles')
 
         if rtacfr_p_t_runs:
             avg_rtacfr_p_t = np.mean(np.vstack(rtacfr_p_t_runs), axis=0)
@@ -844,7 +855,7 @@ def generate_sensitivity_heatmap_grid(df_sens):
     plt.close(fig)
     print(f"Sensitivity analysis heatmap grid saved at: {save_path}")
 
-def full_analysis_workflow():
+def full_analysis_workflow(optimal_params_override=None):
     """The full, two-stage analysis workflow."""
     os.makedirs(PLOTS_DIR, exist_ok=True)
     
@@ -856,10 +867,14 @@ def full_analysis_workflow():
     # generate_sensitivity_heatmap_grid(df_sens)      # Heatmap generation disabled
     generate_sensitivity_line_plots(df_sens)        # Line plots
     
-    optimal_params = find_optimal_hyperparameters(df_sens)
+    optimal_params = (
+        dict(optimal_params_override)
+        if optimal_params_override is not None
+        else find_optimal_hyperparameters(df_sens)
+    )
     
     # Stage 2: Analyze main simulation results
-    df_main = load_and_process_main_results(MAIN_RESULTS_DIR)
+    df_main = load_and_process_main_results(MAIN_RESULTS_DIR, optimal_params)
     generate_main_results_table(df_main)
     generate_publication_figure(MAIN_RESULTS_DIR, optimal_params)
 

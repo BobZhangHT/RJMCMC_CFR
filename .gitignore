@@ -1,13 +1,26 @@
-/results
-/results/sensitivity
-/results/main
-/rtacfr_cache
-/plots
-/.ipynb_checkpoints
-/__pycache__
+/archive/
+/results/
+/plots/
+/rtacfr_cache/
+/tmp/
+/paper/
+/reviewer/
 
-/paper
-/reviewer
+/build/
+/dist/
+/*.egg-info/
+/.pytest_cache/
+/.ipynb_checkpoints/
+/**/__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dll
 
+/.venv/
+/venv/
+.coverage
+
+*.pdf
 *.PDF
 *.ipynb
