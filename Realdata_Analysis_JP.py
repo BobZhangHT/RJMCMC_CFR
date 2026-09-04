@@ -785,7 +785,7 @@ def _plot_comparison(df, results_dict, rtacfr_signal, plots_dir: Path, show: boo
     pelt = results_dict["PELT"]
     binseg = results_dict["BinSeg"]
     fig, axes = plt.subplots(3, 1, figsize=(20, 24), sharex=True)
-    fig.suptitle("Comparison of CFR Estimation Methods for Japan", fontsize=26, y=0.925, fontweight="bold")
+    fig.suptitle("Comparison of CFR Estimation Methods for the Japan Dataset", fontsize=26, y=0.925, fontweight="bold")
     time_axis = df["date"]
 
     def clean_legend(ax):
@@ -794,20 +794,20 @@ def _plot_comparison(df, results_dict, rtacfr_signal, plots_dir: Path, show: boo
         ax.legend(by_label.values(), by_label.keys(), fontsize=14, frameon=True, fancybox=True, shadow=True)
 
     ax = axes[0]
-    ax.plot(time_axis, rjmcmc["p_t_hat"], color="dodgerblue", label="RJMCMC Mean Estimate", linewidth=3)
-    ax.fill_between(time_axis, rjmcmc["p_t_lower_ci"], rjmcmc["p_t_upper_ci"], color="skyblue", alpha=0.4, label="RJMCMC 95% CrI")
-    ax.plot(time_axis, rtacfr_signal, color="crimson", linestyle="--", lw=3, label="rtaCFR Estimate")
+    ax.plot(time_axis, rjmcmc["p_t_hat"], color="dodgerblue", label="RJMCMC posterior mean", linewidth=3)
+    ax.fill_between(time_axis, rjmcmc["p_t_lower_ci"], rjmcmc["p_t_upper_ci"], color="skyblue", alpha=0.4, label="RJMCMC 95% credible interval")
+    ax.plot(time_axis, rtacfr_signal, color="crimson", linestyle="--", lw=3, label="rtaCFR")
     for i, cp_idx in enumerate(rjmcmc["taus_est"]):
-        ax.axvline(x=df["date"].iloc[cp_idx], color="dodgerblue", linestyle=":", lw=3, label="RJMCMC CP" if i == 0 else "")
-    ax.set_title("Proposed Method (RJMCMC) vs. rtaCFR Estimator", fontsize=22, fontweight="bold")
+        ax.axvline(x=df["date"].iloc[cp_idx], color="dodgerblue", linestyle=":", lw=3, label="RJMCMC changepoints" if i == 0 else "")
+    ax.set_title("(a) RJMCMC and rtaCFR", fontsize=22, fontweight="bold")
     ax.set_ylabel("Case Fatality Rate", fontsize=22)
     clean_legend(ax)
 
     for ax, result, color, title, label in [
-        (axes[1], pelt, "darkorange", "Benchmark: rtaCFR Signal with PELT Detection", "PELT CP"),
-        (axes[2], binseg, "purple", "Benchmark: rtaCFR + Binary Segmentation", "BinSeg CP"),
+        (axes[1], pelt, "darkorange", "(b) rtaCFR + PELT", "PELT changepoints"),
+        (axes[2], binseg, "purple", "(c) rtaCFR + BinSeg", "BinSeg changepoints"),
     ]:
-        ax.plot(time_axis, result["p_t_hat"], color=color, label=title.replace("Benchmark: ", ""), linewidth=3)
+        ax.plot(time_axis, result["p_t_hat"], color=color, label=title[4:], linewidth=3)
         for i, cp_idx in enumerate(result["taus_est"]):
             ax.axvline(x=df["date"].iloc[cp_idx], color=color, linestyle=":", lw=3, label=label if i == 0 else "")
         ax.set_title(title, fontsize=22, fontweight="bold")
