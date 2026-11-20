@@ -38,6 +38,41 @@ def stable_seed(base_seed: int, *parts: object) -> int:
     return int.from_bytes(digest, "little") % (2**32 - 1)
 
 
+def rank_diagnostics(values):
+    """Return rank Rhat, bulk ESS and 5/95% tail ESS for every coordinate.
+
+    Arrays have (chain, draw, coordinate) axes. Exact duplicate trajectories
+    share a calculation, and results are restored for every coordinate.
+    Nonfinite diagnostics are retained so callers can reject incomplete runs.
+    """
+    import numpy as np
+    import arviz as az
+
+    values = np.asarray(values)
+    if values.ndim == 2:
+        values = values[:, :, None]
+    if values.ndim != 3 or values.shape[0] < 2 or values.shape[1] < 4:
+        raise ValueError("Diagnostics require (chains>=2, draws>=4, coordinates)")
+    representatives, mapping, groups = [], [], {}
+    for j in range(values.shape[2]):
+        vector = values[:, :, j]
+        key = hashlib.blake2b(vector.tobytes(), digest_size=20).digest()
+        candidates = groups.setdefault(key, [])
+        match = next((i for i in candidates if np.array_equal(vector, values[:, :, representatives[i]])), None)
+        if match is None:
+            match = len(representatives)
+            representatives.append(j)
+            candidates.append(match)
+        mapping.append(match)
+    rh, bulk, tail = [], [], []
+    for start in range(0, len(representatives), 20):
+        block = values[:, :, representatives[start:start + 20]]
+        rh.extend(np.asarray(az.rhat(block, method="rank")).reshape(-1))
+        bulk.extend(np.asarray(az.ess(block, method="bulk")).reshape(-1))
+        tail.extend(np.asarray(az.ess(block, method="tail", prob=(.05, .95))).reshape(-1))
+    return tuple(np.asarray(v)[mapping] for v in (rh, bulk, tail))
+
+
 def call_rjmcmc(
     run_fn: Callable[..., R],
     data: Any,
@@ -58,6 +93,7 @@ def call_rjmcmc(
     global_move_prob: float | None = None,
     max_k: int | None = None,
     u_prop_sigma: float | None = None,
+    storage_stride: int | None = None,
 ) -> R:
     """Call old or extended RJMCMC APIs without changing ``methods.py``."""
     if seed is not None:
@@ -87,6 +123,7 @@ def call_rjmcmc(
         "global_move_prob": global_move_prob,
         "max_k": max_k,
         "u_prop_sigma": u_prop_sigma,
+        "storage_stride": storage_stride,
     }
     for name, value in values.items():
         if value is not None and (name in signature.parameters or accepts_kwargs):

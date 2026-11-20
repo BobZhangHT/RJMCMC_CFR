@@ -4,6 +4,47 @@ import pytest
 import methods
 
 
+def test_fast_kernel_preserves_original_seeded_transitions_and_storage():
+    rng = np.random.default_rng(8217)
+    cases = rng.integers(50, 120, 60).astype(float)
+    deaths = rng.poisson(3, 60).astype(float)
+    delay = np.ones(11) / 11
+    state = (3, np.array([2, 22, 59]), np.array([-3.8, -3.5, -3.1, -3.6]))
+    args = (deaths, cases, delay, .7, -3.5, 1.5, .5, .2, 5, 0.)
+    actual = methods._fast_sample_thinned(*args, 301, 29, 3, 703, *state, 1,
+                                          storage_stride=7)
+    np.random.seed(703)
+    original = methods._rjmcmc_sampler_numba(
+        deaths, cases, delay, 60, .7, -3.5, 1.5, .5, .2, 5, 0.,
+        301, 29, 3, state, True)
+    for new, old in zip(actual[:3], original[:3]):
+        np.testing.assert_array_equal(new, old[::7])
+    for name in ('proposed', 'accepted', 'move_names'):
+        np.testing.assert_array_equal(actual[3][name], original[3][name])
+
+
+def test_fast_public_api_matches_the_four_r2_japan_witnesses():
+    import hashlib
+    import json
+    from pathlib import Path
+    import pandas as pd
+    from workflow_runtime import stable_seed
+
+    root = Path(__file__).resolve().parents[1]
+    expected = json.loads((root / 'reference_r2.json').read_text())['japan']['seeded_short_witness']
+    frame = pd.read_csv(root / 'JP_Data.csv')
+    data = dict(cases=frame.ct.to_numpy(float), deaths=frame.dt.to_numpy(float))
+    for chain in range(4):
+        k = 0 if chain < 2 else 10
+        state = (k, np.linspace(2, 699, k, dtype=int), [-6. if chain % 2 == 0 else -1.] * (k+1))
+        result = methods.run_rjmcmc(
+            data, backend='numba-fast', iterations=101, burn_in=29, storage_stride=7,
+            initial_state=state, theta_prop_sigma=.2, return_samples=True,
+            seed=stable_seed(20261121, 'reviewer-original-long-confirmation', chain))
+        for name in ('k', 'taus', 'theta'):
+            assert hashlib.sha256(result['samples'][name].tobytes()).hexdigest() == expected[str(chain)][name]
+
+
 def _small_data(T=32):
     cases = np.full(T, 1000.0)
     delay = np.exp(-np.arange(T, dtype=float) / 5.0)

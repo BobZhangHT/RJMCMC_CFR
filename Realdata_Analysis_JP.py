@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import inspect
 import multiprocessing as mp
 import os
@@ -21,6 +23,8 @@ from workflow_runtime import (
     run_parallel,
     stable_seed,
     call_rjmcmc,
+    atomic_json_dump,
+    rank_diagnostics,
 )
 
 
@@ -84,6 +88,10 @@ def _runtime_paths(args: argparse.Namespace) -> dict[str, Any]:
         "max_k": args.max_changepoints,
         "u_prop_sigma": args.split_proposal_sigma,
         "chain_burn_in": args.chain_burn_in,
+        "chain_storage_stride": args.chain_storage_stride,
+        "chain_seed": args.chain_seed,
+        "chain_seed_family": "reviewer-original-long-confirmation",
+        "data_sha256": hashlib.sha256(Path(args.data).read_bytes()).hexdigest(),
     }
 
 
@@ -190,75 +198,45 @@ def _extract_trace(result: Any) -> dict[str, Any]:
 
 def _reviewer_chain_worker(task: tuple[Any, ...]):
     chain_idx, initial_state, data, runtime, chain_iterations, seed, smoke, checkpoint, resume = task
-    checkpoint = Path(checkpoint)
-    if resume and checkpoint.exists():
-        return load_pickle(checkpoint)
-    _configure_project(runtime, smoke)
     import numpy as np
+    import importlib.metadata
+    checkpoint = Path(checkpoint)
+    _configure_project(runtime, smoke)
     from config import REAL_DATA_PRIOR_K_GEOMETRIC_P, REAL_DATA_PRIOR_THETA_SIGMA
-    run_rjmcmc = load_rjmcmc()
-
+    call_seed = stable_seed(runtime['chain_seed'], runtime['chain_seed_family'], chain_idx)
+    signature = dict(chain=chain_idx, iterations=chain_iterations,
+        burn_in=runtime['chain_burn_in'], storage_stride=runtime['chain_storage_stride'],
+        seed=call_seed, initial_state=initial_state, data_sha256=runtime['data_sha256'],
+        backend=runtime.get('backend') or 'numba-fast', theta_proposal_sigma=runtime['theta_prop_sigma'],
+        move_window=runtime.get('move_window'), global_move_probability=runtime['global_move_prob'],
+        max_k=runtime.get('max_k'), split_sigma=runtime.get('u_prop_sigma'),
+        p_geom=REAL_DATA_PRIOR_K_GEOMETRIC_P, theta_prior_sigma=REAL_DATA_PRIOR_THETA_SIGMA,
+        sources={name: hashlib.sha256((SCRIPT_DIR/name).read_bytes()).hexdigest()
+                 for name in ['methods.py','config.py','workflow_runtime.py','Realdata_Analysis_JP.py']},
+        software={name: importlib.metadata.version(name) for name in ['numpy','scipy','numba','arviz','arviz-stats']})
+    signature = json.loads(json.dumps(signature, default=lambda x: x.item() if hasattr(x,'item') else str(x)))
+    meta_path = checkpoint.with_suffix('.json')
+    if resume and checkpoint.exists():
+        if not meta_path.exists():
+            raise ValueError(f'Legacy checkpoint has no R2 provenance: {checkpoint}; use a new --results-root')
+        meta=json.loads(meta_path.read_text())
+        if meta['signature'] != signature or meta['checkpoint_sha256'] != hashlib.sha256(checkpoint.read_bytes()).hexdigest():
+            raise ValueError(f'Checkpoint settings or contents differ: {checkpoint}; use a new --results-root')
+        return f'cached: {checkpoint}'
     started = time.perf_counter()
-    call_seed = stable_seed(seed, "reviewer-chain", chain_idx)
-    signature = inspect.signature(run_rjmcmc)
-    supports_initial_state = "initial_state" in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-    requested_state = initial_state if supports_initial_state else None
-    state_status = "requested" if supports_initial_state else "unsupported_by_api"
-    try:
-        result = call_rjmcmc(
-            run_rjmcmc,
-            data,
-            p_geom=REAL_DATA_PRIOR_K_GEOMETRIC_P,
-            theta_sigma=REAL_DATA_PRIOR_THETA_SIGMA,
-            seed=call_seed,
-            backend=runtime.get("backend"),
-            iterations=chain_iterations,
-            burn_in=runtime.get("chain_burn_in"),
-            initial_state=requested_state,
-            return_samples=True,
-            diagnostics=True,
-            move_window=runtime.get("move_window"),
-            theta_prop_sigma=runtime.get("theta_prop_sigma"),
-            global_move_prob=runtime.get("global_move_prob"),
-            max_k=runtime.get("max_k"),
-            u_prop_sigma=runtime.get("u_prop_sigma"),
-            summary_method="mode",
-        )
-    except TypeError:
-        # Some experimental APIs advertise initial_state but use a narrower
-        # schema. Keep the chain result, while making the limitation visible.
-        state_status = "initial_state_rejected"
-        result = call_rjmcmc(
-            run_rjmcmc,
-            data,
-            p_geom=REAL_DATA_PRIOR_K_GEOMETRIC_P,
-            theta_sigma=REAL_DATA_PRIOR_THETA_SIGMA,
-            seed=call_seed,
-            backend=runtime.get("backend"),
-            iterations=chain_iterations,
-            burn_in=runtime.get("chain_burn_in"),
-            return_samples=True,
-            diagnostics=True,
-            move_window=runtime.get("move_window"),
-            theta_prop_sigma=runtime.get("theta_prop_sigma"),
-            global_move_prob=runtime.get("global_move_prob"),
-            max_k=runtime.get("max_k"),
-            u_prop_sigma=runtime.get("u_prop_sigma"),
-            summary_method="mode",
-        )
-    record = {
-        "chain": chain_idx,
-        "requested_initial_state": initial_state,
-        "initial_state_status": state_status,
-        "runtime_seconds": time.perf_counter() - started,
-        "result": result,
-        "trace": _extract_trace(result),
-    }
+    result = call_rjmcmc(load_rjmcmc(), data,
+        p_geom=REAL_DATA_PRIOR_K_GEOMETRIC_P, theta_sigma=REAL_DATA_PRIOR_THETA_SIGMA,
+        seed=call_seed, backend=signature['backend'], iterations=chain_iterations,
+        burn_in=runtime['chain_burn_in'], storage_stride=runtime['chain_storage_stride'],
+        initial_state=initial_state, return_samples=True, diagnostics=True,
+        move_window=runtime.get('move_window'), theta_prop_sigma=runtime['theta_prop_sigma'],
+        global_move_prob=runtime['global_move_prob'], max_k=runtime.get('max_k'),
+        u_prop_sigma=runtime.get('u_prop_sigma'), summary_method='mode')
+    record=dict(chain=chain_idx, requested_initial_state=initial_state, initial_state_status='requested',
+                runtime_seconds=time.perf_counter()-started, result=result, trace=_extract_trace(result), signature=signature)
     atomic_pickle_dump(record, checkpoint)
-    return record
+    atomic_json_dump(dict(signature=signature, checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest()),meta_path)
+    return f'completed: {checkpoint}'
 
 
 def _normalise_trace_array(value: Any):
@@ -273,264 +251,89 @@ def _normalise_trace_array(value: Any):
 
 
 def run_reviewer_diagnostics(data: dict[str, Any], runtime: dict[str, Any], args: argparse.Namespace) -> None:
-    """Run optional chains and write honest diagnostics/artifacts.
-
-    If the installed RJMCMC API does not return samples, the CSV records that
-    limitation and no fabricated R-hat/ESS values are emitted.
-    """
+    """Run the original dispersed chains with the R2 lengths and storage schedule."""
     import numpy as np
-
-    reviewer_root = Path(runtime["realdata_root"]) / "reviewer"
-    chain_root = reviewer_root / "chains"
-    chain_root.mkdir(parents=True, exist_ok=True)
+    import pandas as pd
     from config import K_MAX
-
-    configured_k_max = runtime.get("max_k")
-    k_max = K_MAX if configured_k_max is None else int(configured_k_max)
-    k_max = min(3, k_max) if args.smoke else k_max
-    t_length = len(data["cases"])
-    spread_taus = list(np.linspace(2, t_length - 1, k_max, dtype=int)) if k_max else []
-    states = [
-        {"k": 0, "taus": [], "theta_values": [-6.0]},
-        {"k": 0, "taus": [], "theta_values": [-1.0]},
-        {"k": k_max, "taus": spread_taus, "theta_values": [-6.0] * (k_max + 1)},
-        {"k": k_max, "taus": spread_taus, "theta_values": [-1.0] * (k_max + 1)},
-    ][: args.chains]
-    tasks = [
-        (
-            idx,
-            state,
-            data,
-            runtime,
-            args.chain_iterations,
-            args.seed,
-            args.smoke,
-            chain_root / f"chain_{idx:02d}.pkl",
-            args.resume,
-        )
-        for idx, state in enumerate(states)
-    ]
-    pending = [task for task in tasks if not (args.resume and Path(task[-2]).exists())]
-    run_parallel(pending, _reviewer_chain_worker, args.workers, "Reviewer RJMCMC chains")
-    records = [load_pickle(task[-2]) for task in tasks if Path(task[-2]).exists()]
-
-    rows = [
-        {
-            "chain": record["chain"],
-            "runtime_seconds": record["runtime_seconds"],
-            "initial_state_status": record["initial_state_status"],
-            "trace_available": bool(record.get("trace")),
-        }
-        for record in records
-    ]
-    runtime_csv = reviewer_root / "chain_runtime.csv"
-    atomic_text_write(_csv_text(rows), runtime_csv)
-
-    acceptance_rows = []
-    for record in records:
-        diagnostics = record.get("result", {}).get("sampler_diagnostics", {})
-        for name, proposed, accepted in zip(
-            diagnostics.get("move_names", ()),
-            diagnostics.get("proposed", ()),
-            diagnostics.get("accepted", ()),
-        ):
-            acceptance_rows.append(
-                {
-                    "chain": record["chain"],
-                    "move": name,
-                    "proposed": int(proposed),
-                    "accepted": int(accepted),
-                    "acceptance_rate": float(accepted / proposed) if proposed else float("nan"),
-                }
-            )
-    atomic_text_write(
-        _csv_text(acceptance_rows or [{"status": "diagnostics_unavailable"}]),
-        reviewer_root / "acceptance_rates.csv",
-    )
-
-    trace_by_name: dict[str, list[Any]] = {}
-    for record in records:
-        for name, value in record.get("trace", {}).items():
-            if name not in {"k", "p_t"}:
-                continue
-            array = _normalise_trace_array(value)
-            trace_by_name.setdefault(name, []).append(array)
-
-    metric_rows: list[dict[str, Any]] = []
-    coordinate_rows: list[dict[str, Any]] = []
-    distribution_rows: list[dict[str, Any]] = []
-    posterior: dict[str, Any] = {}
-    selected_p_t: list[int] = []
-    if not trace_by_name:
-        metric_rows.append({"status": "trace_unavailable_from_run_rjmcmc"})
-    else:
-        try:
-            import arviz as az
-
-            for name, arrays in trace_by_name.items():
-                if len({array.shape[1] for array in arrays}) != 1:
-                    continue
-                posterior[name] = np.stack(arrays, axis=0)
-            if "p_t" in posterior:
-                posterior["mean_p_t"] = posterior["p_t"].mean(axis=2, keepdims=True)
-            if not posterior:
-                metric_rows.append({"status": "trace_shapes_incompatible"})
-            else:
-                try:
-                    inference_data = az.from_dict(posterior=posterior)
-                except TypeError:
-                    inference_data = az.from_dict({"posterior": posterior})
-                rhat_result = az.rhat(inference_data, method="rank")
-                ess_result = az.ess(inference_data, method="bulk")
-                if "p_t" in posterior:
-                    t_length = posterior["p_t"].shape[2]
-                    selected_p_t = sorted(
-                        {int(round(value)) for value in np.linspace(0, t_length - 1, 6)}
-                    )
-                for variable in posterior:
-                    variable_rhat = np.asarray(rhat_result[variable]).reshape(-1)
-                    variable_ess = np.asarray(ess_result[variable]).reshape(-1)
-                    coordinate_prefix = "t=" if variable == "p_t" else "index="
-                    finite_rhat = np.flatnonzero(np.isfinite(variable_rhat))
-                    finite_ess = np.flatnonzero(np.isfinite(variable_ess))
-                    worst_rhat_idx = (
-                        int(finite_rhat[np.argmax(variable_rhat[finite_rhat])])
-                        if len(finite_rhat) else None
-                    )
-                    minimum_ess_idx = (
-                        int(finite_ess[np.argmin(variable_ess[finite_ess])])
-                        if len(finite_ess) else None
-                    )
-                    metric_rows.append(
-                        {
-                            "variable": variable,
-                            "coordinate": "all (worst)",
-                            "rank_normalized_rhat": (
-                                float(variable_rhat[worst_rhat_idx])
-                                if worst_rhat_idx is not None else float("nan")
-                            ),
-                            "bulk_ess": (
-                                float(variable_ess[minimum_ess_idx])
-                                if minimum_ess_idx is not None else float("nan")
-                            ),
-                            "worst_rhat_coordinate": (
-                                f"{coordinate_prefix}{worst_rhat_idx}"
-                                if worst_rhat_idx is not None else "constant_or_undefined"
-                            ),
-                            "minimum_ess_coordinate": (
-                                f"{coordinate_prefix}{minimum_ess_idx}"
-                                if minimum_ess_idx is not None else "constant_or_undefined"
-                            ),
-                            "status": "ok" if worst_rhat_idx is not None else "constant_or_undefined",
-                        }
-                    )
-                    if variable == "p_t":
-                        coordinate_rows.extend(
-                            {
-                                "coordinate": f"t={time_idx}",
-                                "rank_normalized_rhat": float(variable_rhat[time_idx]),
-                                "bulk_ess": float(variable_ess[time_idx]),
-                            }
-                            for time_idx in range(len(variable_rhat))
-                        )
-                        distribution_rows.append(
-                            {
-                                "variable": "p_t",
-                                "n_coordinates": len(variable_rhat),
-                                "median_rhat": float(np.nanmedian(variable_rhat)),
-                                "rhat_q90": float(np.nanquantile(variable_rhat, 0.90)),
-                                "rhat_q95": float(np.nanquantile(variable_rhat, 0.95)),
-                                "rhat_q99": float(np.nanquantile(variable_rhat, 0.99)),
-                                "proportion_rhat_le_1_01": float(np.nanmean(variable_rhat <= 1.01)),
-                                "proportion_rhat_le_1_05": float(np.nanmean(variable_rhat <= 1.05)),
-                                "proportion_rhat_le_1_10": float(np.nanmean(variable_rhat <= 1.10)),
-                            }
-                        )
-                        for time_idx in selected_p_t:
-                            metric_rows.append(
-                                {
-                                    "variable": "p_t",
-                                    "coordinate": f"t={time_idx}",
-                                    "rank_normalized_rhat": float(variable_rhat[time_idx]),
-                                    "bulk_ess": float(variable_ess[time_idx]),
-                                    "status": "ok",
-                                }
-                            )
-        except ImportError:
-            metric_rows.append({"status": "arviz_unavailable"})
-    atomic_text_write(_csv_text(metric_rows), reviewer_root / "rjmcmc_convergence.csv")
-    atomic_text_write(_csv_text(coordinate_rows), reviewer_root / "rjmcmc_coordinate_diagnostics.csv")
-    atomic_text_write(_csv_text(distribution_rows), reviewer_root / "rjmcmc_rhat_distribution.csv")
-
-    trace_series: dict[str, list[Any]] = {}
-    if "k" in posterior:
-        trace_series["k"] = [chain[:, 0] for chain in posterior["k"]]
-    if "p_t" in posterior:
-        for time_idx in selected_p_t:
-            trace_series[f"p_t[{time_idx}]"] = [chain[:, time_idx] for chain in posterior["p_t"]]
-    if "mean_p_t" in posterior:
-        trace_series["mean(p_t)"] = [chain[:, 0] for chain in posterior["mean_p_t"]]
-
-    trace_rows: list[dict[str, Any]] = []
-    for variable, chains in trace_series.items():
-        for chain_idx, values in enumerate(chains):
-            stride = max(1, len(values) // 5000)
-            trace_rows.extend(
-                {
-                    "chain": records[chain_idx]["chain"],
-                    "variable": variable,
-                    "draw": draw_idx,
-                    "value": float(values[draw_idx]),
-                }
-                for draw_idx in range(0, len(values), stride)
-            )
-    atomic_text_write(_csv_text(trace_rows or [{"status": "trace_unavailable"}]), reviewer_root / "rjmcmc_trace.csv")
-
-    if trace_series:
-        # Some ArviZ installations register a lazy optional JAX module. A
-        # broken optional JAX binary should not prevent matplotlib output.
-        import sys
-
-        sys.modules.pop("jax", None)
-        sys.modules.pop("jaxlib", None)
-        plt = _configure_plotting()
-        trace_colors = ("#0F4D92", "#B64342", "#3A7D44", "#7A5195")
-        ncols = 2
-        nrows = int(np.ceil(len(trace_series) / ncols))
-        fig, axes = plt.subplots(nrows, ncols, figsize=(16, 4 * nrows), squeeze=False)
-        for panel_idx, (ax, (variable, chains)) in enumerate(zip(axes.ravel(), trace_series.items())):
-            for chain_idx, values in enumerate(chains):
-                stride = max(1, len(values) // 5000)
-                ax.plot(
-                    np.arange(0, len(values), stride), values[::stride],
-                    color=trace_colors[chain_idx % len(trace_colors)],
-                    alpha=0.75, linewidth=0.8,
-                    label=f"Chain {records[chain_idx]['chain']}",
-                )
-            if variable == "k":
-                display_label = r"Changepoint count $k$"
-                y_label = r"$k$"
-            elif variable == "mean(p_t)":
-                display_label = r"All-time mean CFR"
-                y_label = r"Mean $p_t$"
-            else:
-                time_idx = int(variable.removeprefix("p_t[").removesuffix("]")) + 1
-                display_label = rf"Daily CFR $p_t$ at $t={time_idx}$"
-                y_label = r"CFR $p_t$"
-            panel_letter = chr(ord("a") + panel_idx)
-            ax.set_title(f"({panel_letter}) {display_label}", fontsize=15, fontweight="bold")
-            ax.set_xlabel("Post-burn-in draw", fontsize=14, fontweight="bold")
-            ax.set_ylabel(y_label, fontsize=14, fontweight="bold")
-            _style_publication_axis(ax)
-        for ax in axes.ravel()[len(trace_series):]:
-            ax.set_visible(False)
-        legend = axes.ravel()[0].legend(ncol=min(4, len(records)), fontsize=10, frameon=False)
-        for text_item in legend.get_texts():
-            text_item.set_fontweight("bold")
-        fig.tight_layout()
-        fig.savefig(Path(runtime["plots_dir"]) / "reviewer_rjmcmc_trace.png", dpi=300, bbox_inches="tight")
-        fig.savefig(Path(runtime["plots_dir"]) / "reviewer_rjmcmc_trace.pdf", bbox_inches="tight")
+    reviewer_root = Path(runtime['realdata_root'])/'reviewer'
+    chain_root=reviewer_root/'chains'
+    chain_root.mkdir(parents=True,exist_ok=True)
+    k_max=K_MAX if runtime.get('max_k') is None else int(runtime['max_k'])
+    k_max=min(3,k_max) if args.smoke else k_max
+    T=len(data['cases'])
+    spread=np.linspace(2,T-1,k_max,dtype=int).tolist() if k_max else []
+    states=[dict(k=0,taus=[],theta_values=[-6.]),dict(k=0,taus=[],theta_values=[-1.]),
+            dict(k=k_max,taus=spread,theta_values=[-6.]*(k_max+1)),
+            dict(k=k_max,taus=spread,theta_values=[-1.]*(k_max+1))][:args.chains]
+    seeds=[stable_seed(runtime['chain_seed'],runtime['chain_seed_family'],c) for c in range(len(states))]
+    if len(set(s&0xffffffff for s in seeds)) != len(states):
+        raise ValueError('Diagnostic seeds collide')
+    tasks=[(c,state,data,runtime,args.chain_iterations,args.seed,args.smoke,
+            chain_root/f'chain_{c:02d}.pkl',args.resume) for c,state in enumerate(states)]
+    # Workers validate provenance even when a checkpoint already exists.
+    run_parallel(tasks,_reviewer_chain_worker,args.workers,'Reviewer RJMCMC chains')
+    records=[load_pickle(t[-2]) for t in tasks]
+    expected=(args.chain_iterations+args.chain_storage_stride-1)//args.chain_storage_stride
+    if any(len(r['trace']['k'])!=expected for r in records):
+        raise ValueError('Unexpected stored diagnostic count')
+    k=np.stack([r['trace']['k'] for r in records])[:,:,None]
+    p=np.stack([r['trace']['p_t'] for r in records])
+    if p.shape != (len(states),expected,T):
+        raise ValueError('Unexpected daily trajectory shape')
+    mean=p.mean(axis=2,keepdims=True)
+    dates=pd.read_csv(args.data).sort_values('date').date.iloc[:T].tolist()
+    rows,coordinates=[],[]
+    all_finite=True
+    for name,values in [('k',k),('p_t',p),('mean_p_t',mean)]:
+        rh,bulk,tail=rank_diagnostics(values)
+        finite=bool(np.all(np.isfinite(rh)) and np.all(np.isfinite(bulk)) and np.all(np.isfinite(tail)))
+        all_finite=all_finite and finite
+        worst=int(np.argmax(rh))
+        rows.append(dict(variable=name,coordinate='all (worst)',rank_normalized_rhat=float(np.max(rh)),
+                         bulk_ess=float(np.min(bulk)),tail_ess=float(np.min(tail)),
+                         worst_day=worst+1 if name=='p_t' else '',
+                         worst_date=dates[worst] if name=='p_t' else '',n_coordinates=len(rh),
+                         n_rhat_ge_1_01=int(np.sum(rh>=1.01)),all_metrics_finite=finite))
+        if name=='p_t':
+            coordinates=[dict(day=j+1,date=dates[j],rank_normalized_rhat=float(rh[j]),
+                              bulk_ess=float(bulk[j]),tail_ess=float(tail[j])) for j in range(T)]
+    atomic_text_write(_csv_text(rows),reviewer_root/'rjmcmc_convergence.csv')
+    atomic_text_write(_csv_text(coordinates),reviewer_root/'rjmcmc_coordinate_diagnostics.csv')
+    passed=all_finite and all(r['rank_normalized_rhat']<1.01 and r['bulk_ess']>=400 and r['tail_ess']>=400 for r in rows)
+    atomic_json_dump(dict(all_monitored_coordinates_pass=passed,monitored_coordinates=T+2,
+                         smoke=args.smoke,summary=rows,all_coordinates_and_chains_included=True),
+                     reviewer_root/'convergence_gate.json')
+    atomic_text_write(_csv_text([dict(chain=r['chain'],runtime_seconds=r['runtime_seconds'],
+                                     stored_draws=expected,seed=seeds[r['chain']]) for r in records]),
+                      reviewer_root/'chain_runtime.csv')
+    # Keep the original six representative days and the R2 Figure 5 layout.
+    import sys
+    sys.modules.pop('jax', None)
+    sys.modules.pop('jaxlib', None)
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    selected=sorted({int(round(v)) for v in np.linspace(0,T-1,6)})
+    series=[(r'Changepoint count $k$',k[:,:,0],r'$k$')]
+    series += [(rf'Daily CFR at $t={j+1}$',p[:,:,j],'CFR') for j in selected]
+    series += [('All-time mean CFR',mean[:,:,0],'Mean CFR')]
+    colors=['#0F4D92','#B64342','#3A7D44','#7A5195']
+    with plt.rc_context(matplotlib.rcParamsDefault):
+        plt.rcParams.update({'font.size':12,'pdf.fonttype':42})
+        fig,axes=plt.subplots(4,2,figsize=(10.5,9.8),layout='constrained')
+        for idx,(ax,(title,values,ylabel)) in enumerate(zip(axes.flat,series)):
+            display_stride=max(1,expected//5000)
+            x=np.arange(expected)[::display_stride]*args.chain_storage_stride+1
+            for c in range(len(states)):
+                ax.plot(x,values[c,::display_stride],color=colors[c],linewidth=.6,alpha=.65,label=f'Chain {c+1}')
+            ax.set(title=f'({chr(97+idx)}) {title}',ylabel=ylabel,xlabel='Post-burn-in iteration')
+            ax.ticklabel_format(style='sci',axis='x',scilimits=(0,0))
+        handles,labels=axes[0,0].get_legend_handles_labels()
+        fig.legend(handles,labels,ncol=4,fontsize=11,frameon=False,loc='upper center',bbox_to_anchor=(.5,1.035))
+        fig.savefig(Path(runtime['plots_dir'])/'reviewer_rjmcmc_trace.pdf',bbox_inches='tight')
+        fig.savefig(Path(runtime['plots_dir'])/'reviewer_rjmcmc_trace.png',dpi=180,bbox_inches='tight')
         plt.close(fig)
+    print(json.dumps(dict(convergence_gate=passed,summary=rows),indent=2))
 
 
 def _pg_worker(task: tuple[Any, ...]):
@@ -593,19 +396,53 @@ def _csv_text(rows: list[dict[str, Any]]) -> str:
     return stream.getvalue()
 
 
+def _pg_reference_records(path: Path) -> list[dict[str, Any]]:
+    import json
+    import numpy as np
+
+    reference = json.loads(path.read_text(encoding="utf-8-sig"))["figure6"]
+    fits = reference["fits"]
+    cap, days = reference["cap"], reference["days"]
+    if (cap != 10 or days != 700
+            or [fit["p_g"] for fit in fits] != [0.1, 0.3, 0.5, 0.7, 0.9]):
+        raise ValueError("Figure 6 reference requires the five original priors, 700 days, and cap 10.")
+    records = []
+    for fit in fits:
+        pip = np.asarray(fit["pip"], dtype=float)
+        locations = np.asarray(fit["modal_locations"])
+        if (pip.shape != (days,) or not np.all((0 <= pip) & (pip <= 1))
+                or fit["max_pip"] != float(pip.max())
+                or not 0 <= fit["cap_mass"] <= 1
+                or locations.shape != (cap,) or locations.dtype.kind not in "iu"
+                or locations[0] < 0 or locations[-1] >= days or np.any(np.diff(locations) <= 0)):
+            raise ValueError(f"Invalid Figure 6 plotting values for p_g={fit['p_g']}.")
+        records.append({
+            "p_geom": fit["p_g"], "runtime_seconds": None,
+            "k_est": len(locations), "taus_est": locations.tolist(),
+            "k_posterior": {cap: fit["cap_mass"]}, "max_pip": fit["max_pip"],
+            "result": {"pip_array": pip},
+        })
+    return records
+
+
 def run_pg_sensitivity(data: dict[str, Any], runtime: dict[str, Any], args: argparse.Namespace) -> None:
     plt = _configure_plotting()
-
-    values = [float(item.strip()) for item in args.pg_values.split(",") if item.strip()]
     root = Path(runtime["realdata_root"]) / "pg_sensitivity"
     root.mkdir(parents=True, exist_ok=True)
-    tasks = [
-        (p_geom, data, runtime, args.pg_iterations, args.seed, args.smoke, root / f"p_{p_geom:g}.pkl", args.resume)
-        for p_geom in values
-    ]
-    pending = [task for task in tasks if not (args.resume and Path(task[-2]).exists())]
-    run_parallel(pending, _pg_worker, args.workers, "p_g sensitivity")
-    records = [load_pickle(task[-2]) for task in tasks if Path(task[-2]).exists()]
+    Path(runtime["plots_dir"]).mkdir(parents=True, exist_ok=True)
+    if args.pg_reference is not None:
+        records = _pg_reference_records(Path(args.pg_reference))
+        print("Drawing Figure 6 from the historical R1 sensitivity snapshot.")
+    else:
+        values = [float(item.strip()) for item in args.pg_values.split(",") if item.strip()]
+        tasks = [
+            (p_geom, data, runtime, args.pg_iterations, args.seed, args.smoke,
+             root / f"p_{p_geom:g}.pkl", args.resume)
+            for p_geom in values
+        ]
+        pending = [task for task in tasks if not (args.resume and Path(task[-2]).exists())]
+        run_parallel(pending, _pg_worker, args.workers, "p_g sensitivity")
+        records = [load_pickle(task[-2]) for task in tasks if Path(task[-2]).exists()]
     rows = [
         {
             "p_geom": record["p_geom"],
@@ -617,6 +454,10 @@ def run_pg_sensitivity(data: dict[str, Any], runtime: dict[str, Any], args: argp
         }
         for record in records
     ]
+    if args.pg_reference is not None:
+        for row in rows:
+            row["cap_mass"] = row.pop("k_posterior")[10]
+            row["source"] = "Historical R1 sensitivity snapshot for the R2 redraw"
     atomic_text_write(_csv_text(rows), root / "p_g_sensitivity.csv")
     if rows:
         import numpy as np
@@ -643,9 +484,9 @@ def run_pg_sensitivity(data: dict[str, Any], runtime: dict[str, Any], args: argp
             aspect="auto",
             origin="lower",
             interpolation="nearest",
-            cmap="viridis",
+            cmap="Greys",
             vmin=0.0,
-            vmax=max(0.25, float(np.nanmax(pip_matrix))),
+            vmax=1.0,
             extent=(1, pip_matrix.shape[1], -0.5, len(p_values) - 0.5),
         )
         for row_idx, item in enumerate(locations):
@@ -653,8 +494,8 @@ def run_pg_sensitivity(data: dict[str, Any], runtime: dict[str, Any], args: argp
                 item + 1,
                 np.full(item.shape, row_idx),
                 s=26,
-                facecolors="none",
-                edgecolors="white",
+                facecolors="white",
+                edgecolors="black",
                 linewidths=0.8,
             )
         axes[0].set_xlabel(r"Time index $t$", fontsize=14, fontweight="bold")
@@ -853,7 +694,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--chain-iterations", type=int, default=None)
     parser.add_argument("--chain-burn-in", type=int, default=None, help="Optional burn-in length for reviewer diagnostic chains")
+    parser.add_argument("--chain-storage-stride", type=int, default=None, help="Save every Nth diagnostic state; default 200 for R2")
+    parser.add_argument("--chain-seed", type=int, default=20261121, help="Independent R2 diagnostic seed; benchmark --seed is unchanged")
     parser.add_argument("--pg-sensitivity", action="store_true")
+    parser.add_argument("--pg-reference", type=Path, default=None,
+                        help="Redraw Figure 6 from the historical R1 snapshot in reference_r2.json")
     parser.add_argument("--pg-values", default="0.1,0.3,0.5,0.7,0.9")
     parser.add_argument("--pg-iterations", type=int, default=None)
     parser.add_argument("--show", action="store_true")
@@ -863,6 +708,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.pg_reference is not None and not (args.reviewer_jobs or args.reviewer_only or args.diagnostics_only):
+        run_pg_sensitivity({}, {
+            "realdata_root": ensure_ignored_output(args.results_root, "results") / "realdata",
+            "plots_dir": ensure_ignored_output(args.plots_dir, "plots"),
+        }, args)
+        return
     if args.workers < 1 or args.n_splits < 2:
         raise SystemExit("--workers must be >= 1 and --n-splits must be >= 2")
     if args.chains < 2 or args.chains > 4:
@@ -874,6 +725,16 @@ def main(argv: list[str] | None = None) -> None:
         args.pg_sensitivity = True
     if args.smoke:
         args.skip_rmse = True
+    if args.chain_iterations is None:
+        args.chain_iterations = 24 if args.smoke else 20000000
+    if args.chain_burn_in is None:
+        args.chain_burn_in = 8 if args.smoke else 2000000
+    if args.chain_storage_stride is None:
+        args.chain_storage_stride = 1 if args.smoke else 200
+    if args.chain_iterations < 4 or args.chain_burn_in < 0 or args.chain_storage_stride < 1:
+        raise SystemExit("Invalid diagnostic iteration, burn-in or storage settings")
+    if (args.chain_iterations + args.chain_storage_stride - 1) // args.chain_storage_stride < 4:
+        raise SystemExit("At least four stored states per chain are required")
     runtime = _runtime_paths(args)
     _configure_project(runtime, args.smoke)
     Path(runtime["realdata_root"]).mkdir(parents=True, exist_ok=True)

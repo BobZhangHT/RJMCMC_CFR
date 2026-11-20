@@ -19,6 +19,7 @@ config.py                  Default model and workflow settings
 JP_Data.csv                Japan case and death data used by the workflow
 events.csv                 Contextual Japan event dates
 tests/                     Backend and workflow consistency tests
+reference_r2.json          R2 diagnostic references and frozen Figure 6 inputs
 ```
 
 Generated results, caches, figures, compiled extensions, manuscripts, and local
@@ -26,7 +27,8 @@ archives are intentionally excluded from Git.
 
 ## Installation
 
-Python 3.9 or newer is required.
+The R2 reference environment uses CPython 3.12.10. Use Python 3.12 and the
+package versions pinned in `requirements.txt` for numerical reproduction.
 
 ```bash
 python -m venv .venv
@@ -66,12 +68,14 @@ result = run_rjmcmc(data, backend="numba", seed=2025)
 Supported backend values are:
 
 - `numba`: portable NumPy/Numba implementation.
+- `numba-fast`: the equivalent local-move implementation used for the R2 Japan
+  long chains; supports storage thinning without allocating unsaved draws.
 - `c`: compiled extension; raises a build hint when unavailable.
 - `auto`: uses the compiled extension when available and otherwise uses Numba.
 
-The random streams of the backends are independent. Their agreement is tested
-statistically through posterior changepoint-count, inclusion-probability, and
-CFR summaries rather than draw-for-draw identity.
+The C and NumPy random streams differ; their posterior summaries are tested
+for statistical agreement. The fast local kernel also has seeded trajectory
+and storage-equivalence tests against the original NumPy kernel.
 
 ## Simulation Workflow
 
@@ -84,10 +88,20 @@ python Simulation_Analysis.py --stage all --workers 8 --backend auto
 Useful focused stages include:
 
 ```bash
-python Simulation_Analysis.py --stage diagnostics --workers 4 --backend auto
 python Simulation_Analysis.py --stage benchmark-delay --benchmark-delay-reps 100 --workers 8
 python Simulation_Analysis.py --stage sensitivity --workers 8 --backend auto
 ```
+
+To reproduce the R2 simulation diagnostics and Figure 3, build the C extension
+above and run:
+
+```bash
+python Simulation_Analysis.py --stage diagnostics --backend c --workers 4 --results-root results/r2 --plots-dir plots/r2
+```
+
+The diagnostic default is 200,000 draws after 5,000 burn-in iterations, without
+thinning, for four dispersed chains in each of the five scenarios. This does
+not change the 20,000-draw fits in the 500-replication performance study.
 
 ## Japan Workflow
 
@@ -101,8 +115,39 @@ Run the convergence diagnostics and prior-sensitivity jobs without repeating
 the benchmark fits:
 
 ```bash
-python Realdata_Analysis_JP.py --reviewer-only --workers 4 --backend auto
+python Realdata_Analysis_JP.py --reviewer-only --workers 4 --backend numba-fast --pg-reference reference_r2.json --results-root results/r2 --plots-dir plots/r2
 ```
+
+This reproduces the R2 Japan diagnostics and Figures 5 and 6. Each chain uses
+2,000,000 burn-in and 20,000,000 post-burn-in transitions, storing every 200th
+state (100,000 per chain). The diagnostic seed is 20261121 with seed family
+`reviewer-original-long-confirmation`, separate from the benchmark seed.
+The original model, four proposals, selection schedule, acceptance ratios and
+proposal settings (M=5, theta SD=0.2, split SD=0.5) are retained. All 700 daily
+CFR values, changepoint count and mean CFR are checked with rank-normalized
+split/folded Rhat and bulk/tail ESS. Expect roughly half an hour on the
+reference workstation; runtime depends on the machine.
+
+`--pg-reference` redraws the existing R1 sensitivity results from a compact
+numeric snapshot because R2 changes only Figure 6(a)'s grayscale encoding.
+The snapshot is not used in the new Japan sampling or convergence diagnostics.
+Omit this option to fit a new sensitivity grid. No ignored archive or manuscript
+file is needed by these commands.
+
+| R2 reference quantity | Maximum Rhat | Minimum bulk ESS |
+|---|---:|---:|
+| Simulations, all five diagnostic datasets | 1.00297 | 1285.4 |
+| Japan, changepoint count | 1.00003 | 82283.3 |
+| Japan, mean CFR | 1.00065 | 4810.9 |
+| Japan, all 700 daily CFR values | 1.00621 | 626.4 |
+
+The largest Japan daily Rhat occurs on day 513 (27 June 2021); the minimum
+daily tail ESS is 616.8. Diagnostic CSVs are under
+`results/r2/realdata/reviewer/` and
+`results/r2/reviewer_simulation_diagnostics/`. Plots are
+`plots/r2/simulation_traceplots.pdf`, `reviewer_rjmcmc_trace.pdf` and
+`p_g_sensitivity.pdf`. Plot display downsampling does not filter diagnostics.
+Checkpoint provenance prevents an earlier short run from being reused as R2.
 
 ## Checkpoints and Outputs
 

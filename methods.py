@@ -12,6 +12,7 @@ It includes:
 import hashlib
 import os
 import re
+import operator
 import numpy as np
 from scipy import linalg
 from scipy.stats import norm
@@ -338,7 +339,7 @@ def c_backend_available():
 
 def available_backends():
     """Return the sampler backends available in the current environment."""
-    return ("numba", "c") if c_backend_available() else ("numba",)
+    return ("numba", "numba-fast", "c") if c_backend_available() else ("numba", "numba-fast")
 
 
 def _rjmcmc_sampler_c(deaths, cases, delay_pmf, T, p_geom, theta_mu,
@@ -455,20 +456,28 @@ def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA,
                diagnostics=False, return_samples=False, delay_dist=None,
                move_window=None, theta_prop_sigma=None,
                global_move_prob=0.0,
-               max_k=None, u_prop_sigma=None):
+               max_k=None, u_prop_sigma=None, storage_stride=1):
     """
     Main wrapper for the RJMCMC sampler. Returns summarized statistics.
 
     ``backend`` may be ``"numba"`` (the historical default), ``"c"`` for
-    the optional compiled kernel, or ``"auto"`` to prefer C and fall back to
+    the optional compiled kernel, ``"numba-fast"`` for the equivalent local
+    kernel used in R2, or ``"auto"`` to prefer C and fall back to
     Numba when the extension has not been built. ``seed`` is optional and is
     useful for reproducible backend comparisons; the two backends do not
     promise identical random-number streams. ``iterations``, ``burn_in``,
     ``initial_state``, and ``diagnostics`` are optional controls intended for
     reproducible checks and sampler investigations.
+    ``storage_stride`` saves every Nth post-burn state. The fast backend
+    executes every transition while allocating only the saved states.
     """
-    if backend not in {"numba", "c", "auto"}:
-        raise ValueError("backend must be one of: 'numba', 'c', or 'auto'")
+    if backend not in {"numba", "numba-fast", "c", "auto"}:
+        raise ValueError("backend must be one of: 'numba', 'numba-fast', 'c', or 'auto'")
+    if isinstance(storage_stride, (bool, np.bool_)):
+        raise TypeError("storage_stride must be a positive integer")
+    storage_stride = operator.index(storage_stride)
+    if storage_stride < 1:
+        raise ValueError("storage_stride must be a positive integer")
     selected_backend = backend
     if backend == "auto":
         selected_backend = "c" if c_backend_available() else "numba"
@@ -499,7 +508,20 @@ def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA,
     active_delay_dist = DELAY_DIST if delay_dist is None else delay_dist
     delay_pmf = np.diff(active_delay_dist.cdf(np.arange(T_data + 1)))
 
-    if selected_backend == "c":
+    if selected_backend == "numba-fast":
+        if seed is None:
+            seed = int(np.random.randint(0, 2**32 - 1))
+        if normalized_initial_state is None:
+            state_k, state_taus, state_theta = -1, [], []
+        else:
+            state_k, state_taus, state_theta = normalized_initial_state
+        sampler_result = _fast_sample_thinned(
+            data["deaths"], data["cases"], delay_pmf, p_geom, PRIOR_THETA_MU,
+            theta_sigma, active_u_prop_sigma, active_theta_prop_sigma,
+            active_move_window, active_global_move_prob, mcmc_iter, mcmc_burn_in,
+            max_k, int(seed), state_k, state_taus, state_theta, diagnostics,
+            storage_stride=storage_stride)
+    elif selected_backend == "c":
         sampler_result = _rjmcmc_sampler_c(
             data["deaths"], data["cases"], delay_pmf, T_data,
             p_geom, PRIOR_THETA_MU, theta_sigma,
@@ -525,13 +547,18 @@ def run_rjmcmc(data, p_geom=PRIOR_K_GEOMETRIC_P, theta_sigma=PRIOR_THETA_SIGMA,
         k_samples, taus_samples, theta_samples, sampler_diagnostics = sampler_result
     else:
         k_samples, taus_samples, theta_samples = sampler_result
+    if selected_backend != "numba-fast" and storage_stride > 1:
+        k_samples = k_samples[::storage_stride]
+        taus_samples = taus_samples[::storage_stride]
+        theta_samples = theta_samples[::storage_stride]
     
     # --- Post-processing ---
-    p_t_samples = np.zeros((mcmc_iter, T_data))
-    for i in range(mcmc_iter):
+    stored_count = len(k_samples)
+    p_t_samples = np.zeros((stored_count, T_data))
+    for i in range(stored_count):
         k, taus, thetas = k_samples[i], taus_samples[i, :k_samples[i]], theta_samples[i, :(k_samples[i] + 1)]
         theta_t_sample = _get_theta_t_from_state(k, taus, thetas, T_data)
-        p_t_samples[i, :] = _sigmoid(theta_t_sample)
+        p_t_samples[i, :] = expit(theta_t_sample) if selected_backend == "numba-fast" else _sigmoid(theta_t_sample)
     
     p_t_mean = np.mean(p_t_samples, axis=0)
     p_t_lower_ci = np.percentile(p_t_samples, 2.5, axis=0)
@@ -1016,3 +1043,343 @@ def run_binseg(
         if end > start:
             p_t_hat[start:end] = np.mean(signal[start:end])
     return {"k_est": best_k, "taus_est": result[:-1], "p_t_hat": p_t_hat}
+
+
+# Exact segment-exposure implementation of the same local RJMCMC kernel.
+# RNG draws, proposals, priors and acceptance ratios match the original loop.
+_fast_move_probabilities = njit(_move_probabilities)
+_fast_relocation_support = njit(_relocation_support)
+
+@njit
+def _fast_build_exposure(cases, delay):
+    """Store H[b, t] = sum of observable exposure from case days before b."""
+    T = cases.size
+    high = np.zeros((T + 1, T))
+    low = np.zeros_like(high)
+    for i in range(T):
+        high[i + 1] = high[i]
+        low[i + 1] = low[i]
+        for lag in range(min(delay.size, T - i)):
+            t = i + lag
+            term = cases[i] * delay[lag]
+            previous = high[i, t]
+            rounded = previous + term
+            added = rounded - previous
+            # TwoSum residual and renormalization, as in accelerated_sampler.c.
+            residual = (previous - (rounded - added)) + (term - added)
+            correction = low[i, t] + residual
+            high[i + 1, t] = rounded + correction
+            low[i + 1, t] = (rounded - high[i + 1, t]) + correction
+    return high, low
+
+
+@njit
+def _fast_log_likelihood(deaths, high, low, delay_len, k, taus, theta, expected):
+    T = deaths.size
+    expected.fill(0.0)
+    start = 0
+    for segment in range(k + 1):
+        end = taus[segment] if segment < k else T
+        probability = _sigmoid(theta[segment])
+        # Case day end - 1 contributes through outcome day end + delay_len - 2.
+        stop = min(T, end + delay_len - 1)
+        for t in range(start, stop):
+            mass = (high[end, t] - high[start, t]) + (low[end, t] - low[start, t])
+            expected[t] += probability * mass
+        start = end
+
+    log_lik = 0.0
+    for t in range(T):
+        mu = max(1e-9, expected[t])
+        log_lik += deaths[t] * np.log(mu) - mu
+    return log_lik
+
+
+@njit
+def _fast_relocation_probability(taus, idx, T, move_window, candidate):
+    lower, upper, size = _fast_relocation_support(taus, idx, T, move_window)
+    if size > 0 and lower <= candidate <= upper:
+        return 1.0 / size
+    return 0.0
+
+
+@njit
+def _fast_sampler_kernel(deaths, cases, delay_pmf, p_geom, theta_mu, theta_sigma, u_sigma,
+            theta_prop_sigma, move_window, mcmc_iter, mcmc_burn_in, max_k, seed,
+            initial_k, initial_taus, initial_theta, storage_stride=1):
+    np.random.seed(seed)
+    T = deaths.size
+    if initial_k == -1:
+        k = 0
+        taus = np.empty(0, dtype=np.int64)
+        theta_values = np.array([np.random.normal(theta_mu, theta_sigma)])
+    else:
+        k = initial_k
+        taus = initial_taus.copy()
+        theta_values = initial_theta.copy()
+
+    high, low = _fast_build_exposure(cases, delay_pmf)
+    delay_len = delay_pmf.size
+    expected = np.empty(T)
+    log_lik_current = _fast_log_likelihood(deaths, high, low, delay_len, k, taus,
+                                      theta_values, expected)
+
+    # Allocate one row for each post-burn index in range(0, mcmc_iter, storage_stride).
+    stored_draws = 1 + (mcmc_iter - 1) // storage_stride
+    k_samples = np.zeros(stored_draws, dtype=np.int64)
+    taus_samples = np.full((stored_draws, max_k), -1, dtype=np.int64)
+    theta_samples = np.full((stored_draws, max_k + 1), np.nan, dtype=np.float64)
+    proposed = np.zeros(4, dtype=np.int64)
+    accepted = np.zeros(4, dtype=np.int64)
+
+    for iter_idx in range(mcmc_iter + mcmc_burn_in):
+        log_prior_k_current = _log_pmf_geometric(k, p_geom)
+        log_prior_theta_current = np.sum(_log_pdf_normal(theta_values, theta_mu, theta_sigma))
+
+        # Randomly choose a move type
+        u_move = np.random.rand()
+        p_birth, p_death, p_move, p_update = _fast_move_probabilities(k, max_k)
+        if u_move < p_birth:
+            move_type, move_idx = "birth", 0
+        elif u_move < p_birth + p_death:
+            move_type, move_idx = "death", 1
+        elif u_move < p_birth + p_death + p_move:
+            move_type, move_idx = "move", 2
+        else:
+            move_type, move_idx = "update", 3
+        proposed[move_idx] += (k + 1) if move_type == "update" else 1
+
+        # --- RJMCMC Move Types ---
+        if move_type == "birth":
+            # Propose adding a new changepoint
+            possible_cps = np.array([i for i in range(2, T) if i not in taus])
+            if len(possible_cps) > 0:
+                tau_star = np.random.choice(possible_cps)
+                seg_idx = np.searchsorted(taus, tau_star)
+                theta_j = theta_values[seg_idx]
+                u_aux = np.random.normal(0, u_sigma)
+                theta1_star, theta2_star = theta_j - u_aux, theta_j + u_aux
+
+                # New state
+                k_new, taus_new = k + 1, np.sort(np.append(taus, tau_star))
+                theta_values_new = np.concatenate((theta_values[:seg_idx], np.array([theta1_star, theta2_star]), theta_values[seg_idx+1:]))
+
+                # Metropolis-Hastings-Green acceptance probability
+                log_lik_new = _fast_log_likelihood(
+                    deaths, high, low, delay_len, k_new, taus_new, theta_values_new, expected
+                )
+                log_prior_k_new = _log_pmf_geometric(k_new, p_geom)
+                log_prior_theta_new = np.sum(_log_pdf_normal(theta_values_new, theta_mu, theta_sigma))
+
+                log_lik_ratio = log_lik_new - log_lik_current
+                log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
+                p_death_new = _fast_move_probabilities(k_new, max_k)[1]
+                # Uniform location-prior and location-selection counts cancel.
+                log_proposal_ratio = (
+                    np.log(p_death_new / p_birth) -
+                    _log_pdf_normal(u_aux, 0, u_sigma) + np.log(2)
+                )
+
+                log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
+                if np.log(np.random.rand()) < log_alpha:
+                    k, taus, theta_values = k_new, taus_new, theta_values_new
+                    log_lik_current = log_lik_new
+                    accepted[move_idx] += 1
+
+        elif move_type == "death":
+            # Propose removing an existing changepoint
+            idx_to_remove = np.random.randint(0, k)
+            theta1, theta2 = theta_values[idx_to_remove], theta_values[idx_to_remove+1]
+            theta_j_star = (theta1 + theta2) / 2.0
+            u_aux = (theta2 - theta1) / 2.0
+
+            # New state
+            k_new, taus_new = k - 1, np.delete(taus, idx_to_remove)
+            theta_values_new = np.concatenate((theta_values[:idx_to_remove], np.array([theta_j_star]), theta_values[idx_to_remove+2:]))
+
+            # Acceptance probability
+            log_lik_new = _fast_log_likelihood(
+                deaths, high, low, delay_len, k_new, taus_new, theta_values_new, expected
+            )
+            log_prior_k_new = _log_pmf_geometric(k_new, p_geom)
+            log_prior_theta_new = np.sum(_log_pdf_normal(theta_values_new, theta_mu, theta_sigma))
+
+            log_lik_ratio = log_lik_new - log_lik_current
+            log_prior_ratio = (log_prior_k_new - log_prior_k_current) + (log_prior_theta_new - log_prior_theta_current)
+            p_birth_new = _fast_move_probabilities(k_new, max_k)[0]
+            log_proposal_ratio = (
+                np.log(p_birth_new / p_death) +
+                _log_pdf_normal(u_aux, 0, u_sigma) - np.log(2)
+            )
+
+            log_alpha = log_lik_ratio + log_prior_ratio + log_proposal_ratio
+            if np.log(np.random.rand()) < log_alpha:
+                k, taus, theta_values = k_new, taus_new, theta_values_new
+                log_lik_current = log_lik_new
+                accepted[move_idx] += 1
+
+        elif move_type == "move" and k > 0:
+            # Local-only relocation. Keep the canonical mixture RNG draw.
+            idx_to_move = np.random.randint(0, k)
+            tau_current = taus[idx_to_move]
+            np.random.rand()
+            lower_prop, upper_prop, support_size = _fast_relocation_support(
+                taus, idx_to_move, T, move_window
+            )
+            if support_size > 0:
+                proposal_idx = np.random.randint(0, support_size)
+                tau_new = lower_prop + proposal_idx
+                if tau_new >= tau_current:
+                    tau_new += 1
+                if lower_prop <= tau_new <= upper_prop and tau_new != tau_current:
+                    taus_new = np.copy(taus)
+                    taus_new[idx_to_move] = tau_new
+                    log_lik_new = _fast_log_likelihood(
+                        deaths, high, low, delay_len, k, taus_new, theta_values, expected
+                    )
+                    q_forward = _fast_relocation_probability(
+                        taus, idx_to_move, T, move_window, tau_new
+                    )
+                    q_reverse = _fast_relocation_probability(
+                        taus_new, idx_to_move, T, move_window, tau_current
+                    )
+                    log_alpha = (
+                        log_lik_new - log_lik_current +
+                        np.log(q_reverse / q_forward)
+                    )
+                    if np.log(np.random.rand()) < log_alpha:
+                        taus = taus_new
+                        log_lik_current = log_lik_new
+                        accepted[move_idx] += 1
+
+        elif move_type == "update":
+            # Update the value of a theta parameter
+            for j in range(k + 1):
+                theta_current = theta_values[j]
+                theta_proposal = np.random.normal(theta_current, theta_prop_sigma)
+                theta_values_new = np.copy(theta_values)
+                theta_values_new[j] = theta_proposal
+                log_lik_new = _fast_log_likelihood(
+                    deaths, high, low, delay_len, k, taus, theta_values_new, expected
+                )
+                log_prior_ratio = _log_pdf_normal(theta_proposal, theta_mu, theta_sigma) - _log_pdf_normal(theta_current, theta_mu, theta_sigma)
+                log_alpha = (log_lik_new - log_lik_current) + log_prior_ratio
+                if np.log(np.random.rand()) < log_alpha:
+                    theta_values[j] = theta_proposal
+                    log_lik_current = log_lik_new
+                    accepted[move_idx] += 1
+
+        post_burn_idx = iter_idx - mcmc_burn_in
+        if post_burn_idx >= 0 and post_burn_idx % storage_stride == 0:
+            sample_idx = post_burn_idx // storage_stride
+            k_samples[sample_idx] = k
+            if k > 0:
+                taus_samples[sample_idx, :k] = taus
+            theta_samples[sample_idx, :(k + 1)] = theta_values
+
+    return k_samples, taus_samples, theta_samples, proposed, accepted
+
+
+def _fast_vector(values, dtype):
+    array = np.asarray(values, dtype=dtype)
+    if array.ndim != 1:
+        raise ValueError("sampler and state arrays must be one-dimensional")
+    return np.ascontiguousarray(array)
+
+
+def _fast_series(deaths, cases, delay_pmf):
+    deaths = _fast_vector(deaths, np.float64)
+    cases = _fast_vector(cases, np.float64)
+    delay_pmf = _fast_vector(delay_pmf, np.float64)
+    if not deaths.size or deaths.size != cases.size or not delay_pmf.size:
+        raise ValueError("cases and deaths must have equal positive length and delay must be nonempty")
+    if any(not np.all(np.isfinite(a)) or np.any(a < 0) for a in (deaths, cases, delay_pmf)):
+        raise ValueError("observations and delay weights must be finite and nonnegative")
+    return deaths, cases, delay_pmf
+
+
+def _fast_state(T, k, taus, theta):
+    taus = _fast_vector(taus, np.int64)
+    theta = _fast_vector(theta, np.float64)
+    if k >= 0 and (taus.size != k or theta.size != k + 1):
+        raise ValueError("initial state must contain k taus and k+1 theta values")
+    if not np.all(np.isfinite(theta)):
+        raise ValueError("initial logits must be finite")
+    if k > 0 and (taus[0] < 2 or taus[-1] >= T or np.any(taus[1:] <= taus[:-1])):
+        raise ValueError("changepoints must be strictly increasing within [2, T-1]")
+    return taus, theta
+
+
+def _fast_evaluate_likelihood(deaths, cases, delay_pmf, taus, theta):
+    """Return the scalar log likelihood and unfloored daily means at a fixed state."""
+    deaths, cases, delay_pmf = _fast_series(deaths, cases, delay_pmf)
+    taus, theta = _fast_state(deaths.size, len(taus), taus, theta)
+    high, low = _fast_build_exposure(cases, delay_pmf)
+    expected = np.empty(deaths.size)
+    result = _fast_log_likelihood(deaths, high, low, delay_pmf.size, taus.size,
+                             taus, theta, expected)
+    return result, expected
+
+
+def _fast_sample(deaths, cases, delay_pmf, p_geom, theta_mu, theta_sigma, u_sigma,
+           theta_prop_sigma, move_window, global_move_prob, iterations, burn_in,
+           max_k, seed, initial_k, initial_taus, initial_theta, return_diagnostics):
+    """Run the local-only sampler with the archived C positional interface.
+
+    The uint64 seed's lower 32 bits seed Numba's legacy RandomState generator.
+    An initial_k of -1 draws the starting logit from its prior.
+    """
+    return _fast_sample_thinned(
+        deaths, cases, delay_pmf, p_geom, theta_mu, theta_sigma, u_sigma,
+        theta_prop_sigma, move_window, global_move_prob, iterations, burn_in,
+        max_k, seed, initial_k, initial_taus, initial_theta, return_diagnostics,
+        storage_stride=1,
+    )
+
+
+def _fast_sample_thinned(deaths, cases, delay_pmf, p_geom, theta_mu, theta_sigma, u_sigma,
+                   theta_prop_sigma, move_window, global_move_prob, iterations,
+                   burn_in, max_k, seed, initial_k, initial_taus, initial_theta,
+                   return_diagnostics, *, storage_stride=1):
+    """Run the same transitions and store every stride-th row starting at post-burn row zero.
+
+    The stride is a positive integer. Diagnostics count the entire run.
+    """
+    if isinstance(storage_stride, (bool, np.bool_)):
+        raise TypeError("storage_stride must be a positive integer")
+    storage_stride = operator.index(storage_stride)
+    if storage_stride < 1:
+        raise ValueError("storage_stride must be a positive integer")
+
+    deaths, cases, delay_pmf = _fast_series(deaths, cases, delay_pmf)
+    move_window, iterations, burn_in, max_k, seed, initial_k = map(
+        operator.index, (move_window, iterations, burn_in, max_k, seed, initial_k)
+    )
+    if not (0 <= max_k < deaths.size and -1 <= initial_k <= max_k):
+        raise ValueError("invalid changepoint cap or initial dimension")
+    if min(iterations, burn_in, move_window) < 0:
+        raise ValueError("iterations, burn-in, and move window must be nonnegative")
+    if not np.isfinite(p_geom) or not 0 < p_geom < 1 or not np.isfinite(theta_mu):
+        raise ValueError("geometric parameter must be in (0,1) and prior mean must be finite")
+    if any(not np.isfinite(s) or s <= 0 for s in (theta_sigma, u_sigma, theta_prop_sigma)):
+        raise ValueError("proposal and prior scales must be finite and positive")
+    if global_move_prob != 0.0:
+        raise ValueError("this prototype requires global_move_prob=0")
+    if not 0 <= seed < 2**64:
+        raise ValueError("seed must be an unsigned 64-bit integer")
+
+    taus, theta = _fast_state(deaths.size, initial_k, initial_taus, initial_theta)
+    # All strides beyond the draw count select the same rows.
+    storage_stride = min(storage_stride, max(1, iterations))
+    k_out, taus_out, theta_out, proposed, accepted = _fast_sampler_kernel(
+        deaths, cases, delay_pmf, float(p_geom), float(theta_mu), float(theta_sigma),
+        float(u_sigma), float(theta_prop_sigma), move_window, iterations, burn_in,
+        max_k, seed & 0xFFFFFFFF, initial_k, taus, theta, storage_stride,
+    )
+    if return_diagnostics:
+        return k_out, taus_out, theta_out, {
+            "proposed": proposed.tolist(),
+            "accepted": accepted.tolist(),
+            "move_names": ("birth", "death", "move", "update"),
+        }
+    return k_out, taus_out, theta_out

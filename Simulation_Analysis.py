@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import multiprocessing as mp
 import os
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from workflow_runtime import (
+    atomic_json_dump,
     atomic_pickle_dump,
     atomic_text_write,
     ensure_ignored_output,
@@ -309,23 +311,75 @@ def run_benchmark_delay(args: argparse.Namespace, runtime: dict[str, Any]) -> No
 def _diagnostic_worker(task: tuple[Any, ...]) -> str:
     scenario_name, chain_idx, initial_state, runtime, iterations, checkpoint, resume = task
     checkpoint = Path(checkpoint)
-    if resume and checkpoint.exists():
-        return f"cached: {checkpoint}"
     _configure_project(runtime, smoke=False)
-    from config import PRIOR_K_GEOMETRIC_P, PRIOR_THETA_SIGMA, SCENARIOS
+    import numpy as np
+    import scipy
+    import config
     from data_generation import generate_dataset
-    run_rjmcmc = load_rjmcmc()
+    from methods import c_backend_available
 
-    data = generate_dataset(SCENARIOS[scenario_name], rep_idx=0)
+    run_rjmcmc = load_rjmcmc()
+    data = generate_dataset(config.SCENARIOS[scenario_name], rep_idx=0)
+    length = len(data["cases"])
+    seed = stable_seed(runtime["seed"], "diagnostic", scenario_name, chain_idx)
+    backend = runtime.get("backend") or "numba"
+    if backend == "auto":
+        backend = "c" if c_backend_available() else "numba"
+
+    def sha256(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    binary_sha256 = None
+    if backend == "c":
+        if not c_backend_available():
+            raise RuntimeError("The C backend is required. Build it with python setup.py build_ext --inplace.")
+        from _rjmcmc_c import __file__ as c_binary
+        binary_sha256 = sha256(c_binary)
+
+    signature = {
+        "scenario": scenario_name, "chain": chain_idx, "initial_state": initial_state,
+        "iterations": iterations, "burn_in": config.MCMC_BURN_IN, "seed": seed,
+        "data_seed": config.SEED, "rep_idx": 0, "backend": backend,
+        "backend_binary_sha256": binary_sha256,
+        "software": {"numpy": np.__version__, "scipy": scipy.__version__},
+        "source_sha256": {name: sha256(SCRIPT_DIR / name) for name in
+                          ("methods.py", "config.py", "data_generation.py", "workflow_runtime.py")},
+        "input_sha256": {
+            name: hashlib.sha256(np.asarray(values, dtype=dtype).tobytes()).hexdigest()
+            for name, values, dtype in (
+                ("cases", data["cases"], "<i8"), ("deaths", data["deaths"], "<i8"),
+                ("delay", np.diff(config.DELAY_DIST.cdf(np.arange(length + 1))), "<f8"),
+            )
+        },
+        "model": {
+            "p_geom": config.PRIOR_K_GEOMETRIC_P, "theta_mu": config.PRIOR_THETA_MU,
+            "theta_sigma": config.PRIOR_THETA_SIGMA, "max_k": config.K_MAX,
+            "move_window": config.PROPOSAL_MOVE_WINDOW, "theta_prop_sigma": config.PROPOSAL_THETA_SIGMA,
+            "u_prop_sigma": config.PROPOSAL_U_SIGMA, "global_move_prob": 0.0,
+        },
+    }
+    if resume and checkpoint.exists():
+        record = load_pickle(checkpoint)
+        cached = record.get("result", {})
+        samples = cached.get("samples", {})
+        if (record.get("signature") == signature and cached.get("backend") == backend
+                and np.shape(samples.get("k")) == (iterations,)
+                and np.shape(samples.get("taus")) == (iterations, config.K_MAX)
+                and np.shape(samples.get("theta")) == (iterations, config.K_MAX + 1)
+                and np.shape(samples.get("p_t")) == (iterations, length)):
+            return f"cached: {checkpoint}"
+        del record, cached, samples
+
     started = time.perf_counter()
     result = call_rjmcmc(
         run_rjmcmc,
         data,
-        p_geom=PRIOR_K_GEOMETRIC_P,
-        theta_sigma=PRIOR_THETA_SIGMA,
-        seed=stable_seed(runtime["seed"], "diagnostic", scenario_name, chain_idx),
-        backend=runtime.get("backend"),
+        p_geom=config.PRIOR_K_GEOMETRIC_P,
+        theta_sigma=config.PRIOR_THETA_SIGMA,
+        seed=seed,
+        backend=backend,
         iterations=iterations,
+        burn_in=config.MCMC_BURN_IN,
         initial_state=initial_state,
         return_samples=True,
         diagnostics=True,
@@ -335,6 +389,7 @@ def _diagnostic_worker(task: tuple[Any, ...]) -> str:
             "scenario": scenario_name,
             "chain": chain_idx,
             "initial_state": initial_state,
+            "signature": signature,
             "runtime_seconds": time.perf_counter() - started,
             "result": result,
         },
@@ -359,6 +414,10 @@ def _csv_text(rows: list[dict[str, Any]]) -> str:
 def run_diagnostics(args: argparse.Namespace, runtime: dict[str, Any]) -> None:
     import numpy as np
     import config
+    from workflow_runtime import rank_diagnostics
+
+    if args.diagnostic_iterations < 4:
+        raise ValueError("At least four retained draws are required for diagnostics.")
 
     root = Path(runtime["results_root"]) / "reviewer_simulation_diagnostics"
     chain_root = root / "chains"
@@ -377,40 +436,43 @@ def run_diagnostics(args: argparse.Namespace, runtime: dict[str, Any]) -> None:
         for chain_idx, state in enumerate(states):
             checkpoint = chain_root / f"{_safe_component(scenario_name)}_chain{chain_idx}.pkl"
             tasks.append((scenario_name, chain_idx, state, runtime, args.diagnostic_iterations, checkpoint, args.resume))
-    pending = [task for task in tasks if not (args.resume and Path(task[-2]).exists())]
-    run_parallel(pending, _diagnostic_worker, args.workers, "Simulation diagnostic chains")
+    run_parallel(tasks, _diagnostic_worker, args.workers, "Simulation diagnostic chains")
 
-    records = [load_pickle(task[-2]) for task in tasks if Path(task[-2]).exists()]
     rows: list[dict[str, Any]] = []
+    coordinate_rows: list[dict[str, Any]] = []
     trace_data: dict[str, dict[str, list[tuple[int, Any]]]] = {}
-    import arviz as az
+    selected_p_t = sorted({0, config.T // 4, config.T // 2, (3 * config.T) // 4, config.T - 1})
 
     for scenario_name in config.SCENARIOS:
-        scenario_records = [record for record in records if record["scenario"] == scenario_name]
-        if len(scenario_records) != len(states):
-            continue
+        scenario_records = [load_pickle(task[-2]) for task in tasks if task[0] == scenario_name]
         k_draws = np.stack([record["result"]["samples"]["k"][:, None] for record in scenario_records])
-        p_draws = np.stack([record["result"]["samples"]["p_t"] for record in scenario_records])
-        mean_p_draws = p_draws.mean(axis=2, keepdims=True)
-        posterior = {"k": k_draws, "p_t": p_draws, "mean_p_t": mean_p_draws}
-        try:
-            inference_data = az.from_dict(posterior=posterior)
-        except TypeError:
-            inference_data = az.from_dict({"posterior": posterior})
-        rhat_result = az.rhat(inference_data, method="rank")
-        ess_result = az.ess(inference_data, method="bulk")
-        selected_p_t = sorted({0, config.T // 4, config.T // 2, (3 * config.T) // 4, config.T - 1})
-        for variable in posterior:
-            variable_rhat = np.asarray(rhat_result[variable]).reshape(-1)
-            variable_ess = np.asarray(ess_result[variable]).reshape(-1)
+        p_draws = [record["result"]["samples"]["p_t"] for record in scenario_records]
+        mean_p_draws = np.stack([p.mean(axis=1, keepdims=True) for p in p_draws])
+        daily_blocks = [
+            rank_diagnostics(np.stack([p[:, start:start + 20] for p in p_draws]))
+            for start in range(0, config.T, 20)
+        ]
+        diagnostics = {
+            "k": rank_diagnostics(k_draws),
+            "p_t": tuple(np.concatenate(parts) for parts in zip(*daily_blocks)),
+            "mean_p_t": rank_diagnostics(mean_p_draws),
+        }
+        runtime_mean = float(np.mean([record["runtime_seconds"] for record in scenario_records]))
+        for variable, (variable_rhat, variable_ess, _) in diagnostics.items():
+            for coordinate, (rhat, bulk_ess) in enumerate(zip(variable_rhat, variable_ess)):
+                coordinate_rows.append({
+                    "scenario": scenario_name, "variable": variable,
+                    "day": coordinate + 1 if variable == "p_t" else "",
+                    "rank_normalized_rhat": float(rhat), "bulk_ess": float(bulk_ess),
+                })
             rows.append(
                 {
                     "scenario": scenario_name,
                     "variable": variable,
                     "coordinate": "all (worst)",
-                    "max_rank_normalized_rhat": float(np.nanmax(variable_rhat)),
-                    "min_bulk_ess": float(np.nanmin(variable_ess)),
-                    "mean_runtime_seconds": float(np.mean([record["runtime_seconds"] for record in scenario_records])),
+                    "max_rank_normalized_rhat": float(np.max(variable_rhat)),
+                    "min_bulk_ess": float(np.min(variable_ess)),
+                    "mean_runtime_seconds": runtime_mean,
                 }
             )
             if variable == "p_t":
@@ -422,20 +484,34 @@ def run_diagnostics(args: argparse.Namespace, runtime: dict[str, Any]) -> None:
                             "coordinate": f"t={time_idx}",
                             "max_rank_normalized_rhat": float(variable_rhat[time_idx]),
                             "min_bulk_ess": float(variable_ess[time_idx]),
-                            "mean_runtime_seconds": float(np.mean([record["runtime_seconds"] for record in scenario_records])),
+                            "mean_runtime_seconds": runtime_mean,
                         }
                     )
         scenario_traces: dict[str, list[tuple[int, Any]]] = {
-            "k": [(record["chain"], record["result"]["samples"]["k"]) for record in scenario_records],
-            "mean(p_t)": [(record["chain"], record["result"]["samples"]["p_t"].mean(axis=1)) for record in scenario_records],
+            "k": [(chain, k_draws[chain, :, 0]) for chain in range(len(states))],
+            "mean(p_t)": [(chain, mean_p_draws[chain, :, 0]) for chain in range(len(states))],
         }
         for time_idx in selected_p_t:
             scenario_traces[f"p_t[{time_idx}]"] = [
-                (record["chain"], record["result"]["samples"]["p_t"][:, time_idx])
-                for record in scenario_records
+                (chain, p[:, time_idx].copy()) for chain, p in enumerate(p_draws)
             ]
         trace_data[scenario_name] = scenario_traces
+        del scenario_records, p_draws
+
     atomic_text_write(_csv_text(rows), root / "diagnostics_summary.csv")
+    atomic_text_write(_csv_text(coordinate_rows), root / "coordinate_diagnostics.csv")
+    expected = len(config.SCENARIOS) * (config.T + 2)
+    failed = [row for row in coordinate_rows
+              if not (np.isfinite(row["rank_normalized_rhat"]) and row["rank_normalized_rhat"] < 1.01
+                      and np.isfinite(row["bulk_ess"]) and row["bulk_ess"] >= 400)]
+    passed = len(coordinate_rows) == expected and not failed
+    atomic_json_dump({
+        "passed": passed, "rhat_exclusive": 1.01, "bulk_ess_inclusive": 400,
+        "expected_coordinates": expected, "monitored_coordinates": len(coordinate_rows),
+        "failed_coordinates": len(failed), "retained_draws_per_chain": args.diagnostic_iterations,
+    }, root / "convergence_gate.json")
+    print(f"Simulation diagnostic gate: {'PASS' if passed else 'FAIL'} "
+          f"({len(coordinate_rows) - len(failed)}/{expected} coordinates)")
 
     import sys
     sys.modules.pop("jax", None)
@@ -549,7 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--main-reps", type=int, default=None)
     parser.add_argument("--main-p-geom", type=float, default=None)
     parser.add_argument("--main-theta-sigma", type=float, default=None)
-    parser.add_argument("--diagnostic-iterations", type=int, default=20000)
+    parser.add_argument("--diagnostic-iterations", type=int, default=200_000)
     parser.add_argument("--benchmark-delay-reps", type=int, default=None)
     parser.add_argument("--results-root", default="results")
     parser.add_argument("--plots-dir", default="plots")
