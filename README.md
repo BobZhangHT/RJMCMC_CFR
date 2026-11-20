@@ -55,6 +55,10 @@ required for the extension build.
 python setup.py build_ext --inplace --compiler=mingw32
 ```
 
+On the reference Windows machine, application control blocked newly built
+DLLs, so C validation used its existing approved extension built from the
+unchanged `rjmcmc_c.c` source. The Japan `numba-fast` backend needs no C build.
+
 ## Sampler API
 
 Both analysis workflows call the same canonical function:
