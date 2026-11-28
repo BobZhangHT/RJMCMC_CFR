@@ -1,196 +1,94 @@
 # RJMCMC-CFR
 
-Bayesian changepoint inference for a time-varying reported-case fatality rate
-(CFR). Daily deaths are modeled through a convolution of observed case counts,
-a case-to-death delay distribution, and a piecewise-constant latent CFR.
+RJMCMC-CFR uses reversible jump Markov chain Monte Carlo to estimate when the
+case fatality rate (CFR) among reported cases changes. The model links daily
+case and death counts through a case-to-death delay distribution and estimates
+a piecewise-constant CFR. This repository implements the method and reproduces
+the paper's simulation study and Japan COVID-19 analysis.
 
-## Contents
+## Install and fit your data
 
-```text
-methods.py                 Canonical RJMCMC entry point and benchmark methods
-rjmcmc_c.c                 Optional compiled C sampler backend
-Simulation_Analysis.py     Parallel and resumable simulation workflow
-Realdata_Analysis_JP.py    Parallel and resumable Japan analysis
-workflow_runtime.py        Checkpoints, deterministic seeds, and progress bars
-analysis.py                Simulation summaries, tables, and figures
-evaluation_realdata.py     Real-data evaluation metrics
-data_generation.py         Simulation data generation
-config.py                  Default model and workflow settings
-JP_Data.csv                Japan case and death data used by the workflow
-events.csv                 Contextual Japan event dates
-tests/                     Backend and workflow consistency tests
-reference_r2.json          R2 diagnostic references and frozen Figure 6 inputs
-```
-
-Generated results, caches, figures, compiled extensions, manuscripts, and local
-archives are intentionally excluded from Git.
-
-## Installation
-
-The R2 reference environment uses CPython 3.12.10. Use Python 3.12 and the
-package versions pinned in `requirements.txt` for numerical reproduction.
+Use Python 3.12 (3.12.10 for the paper's reference runs).
 
 ```bash
+git clone https://github.com/BobZhangHT/RJMCMC_CFR.git
+cd RJMCMC_CFR
 python -m venv .venv
 ```
 
-Activate the environment, then install the dependencies:
+Activate the environment with `source .venv/bin/activate` on macOS/Linux or
+`.\.venv\Scripts\Activate.ps1` in PowerShell. Then install the pinned dependencies.
 
 ```bash
-python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The NumPy/Numba backend runs without a compiler. To build the optional C
-backend in place:
+On managed Windows systems, use a Python environment approved to load the
+dependencies' native extensions.
 
-```bash
-python setup.py build_ext --inplace
-```
-
-On Windows, a configured MSVC Build Tools installation or MinGW compiler is
-required for the extension build.
-
-```bash
-python setup.py build_ext --inplace --compiler=mingw32
-```
-
-On the reference Windows machine, application control blocked newly built
-DLLs, so C validation used its existing approved extension built from the
-unchanged `rjmcmc_c.c` source. The Japan `numba-fast` backend needs no C build.
-
-## Sampler API
-
-Both analysis workflows call the same canonical function:
+Prepare a CSV with one row per day and columns `date`, `ct` (new reported cases)
+and `dt` (new reported deaths). Use consecutive dates and nonnegative counts.
+The example uses the included [Japan data](JP_Data.csv) and the study's
+delay distribution. Replace the CSV path to use your own series. The
+`numba-fast` backend runs without a C compiler.
 
 ```python
+import pandas as pd
 from methods import run_rjmcmc
 
-result = run_rjmcmc(data, backend="numba", seed=2025)
+daily = pd.read_csv("JP_Data.csv", parse_dates=["date"]).sort_values("date")
+fit = run_rjmcmc(
+    {"cases": daily["ct"].to_numpy(), "deaths": daily["dt"].to_numpy()},
+    backend="numba-fast",
+    seed=2025,
+)
+daily["cfr"] = fit["p_t_hat"]
+print(daily["date"].iloc[fit["taus_est"]].dt.strftime("%Y-%m-%d").tolist())
 ```
 
-Supported backend values are:
+For a new dataset, pass a fitted case-to-death distribution in days via
+`delay_dist` (a SciPy distribution with a `.cdf()` method). Check how plausible
+delay choices affect changepoint locations, and assess mixing with multiple
+chains, rank-normalized R-hat and effective sample size. Interpret shifts in
+light of changes in testing, case definitions and reporting.
 
-- `numba`: portable NumPy/Numba implementation.
-- `numba-fast`: the equivalent local-move implementation used for the R2 Japan
-  long chains; supports storage thinning without allocating unsaved draws.
-- `c`: compiled extension; raises a build hint when unavailable.
-- `auto`: uses the compiled extension when available and otherwise uses Numba.
+## Reproduce the paper
 
-The C and NumPy random streams differ; their posterior summaries are tested
-for statistical agreement. The fast local kernel also has seeded trajectory
-and storage-equivalence tests against the original NumPy kernel.
+Run these commands from the repository root. Jobs save checkpoints under
+`results/` and write figures and tables under `plots/` by default. Use
+`--no-resume` to rerun completed jobs.
 
-## Simulation Workflow
-
-Run the complete simulation, analysis, and plotting pipeline:
+### Simulation study
 
 ```bash
 python Simulation_Analysis.py --stage all --workers 8 --backend auto
-```
-
-Useful focused stages include:
-
-```bash
 python Simulation_Analysis.py --stage benchmark-delay --benchmark-delay-reps 100 --workers 8
-python Simulation_Analysis.py --stage sensitivity --workers 8 --backend auto
 ```
 
-To reproduce the R2 simulation diagnostics and Figure 3, build the C extension
-above and run:
+For the R2 convergence results and Figure 3, build the C extension with a
+working C compiler. On managed systems, the built extension may require
+approval to load. C and Numba use different random streams.
 
 ```bash
+python setup.py build_ext --inplace
 python Simulation_Analysis.py --stage diagnostics --backend c --workers 4 --results-root results/r2 --plots-dir plots/r2
 ```
 
-The diagnostic default is 200,000 draws after 5,000 burn-in iterations, without
-thinning, for four dispersed chains in each of the five scenarios. This does
-not change the 20,000-draw fits in the 500-replication performance study.
-
-## Japan Workflow
-
-Run the real-data analysis:
+### Japan COVID-19 application
 
 ```bash
 python Realdata_Analysis_JP.py --workers 8 --backend auto
-```
-
-Run the convergence diagnostics and prior-sensitivity jobs without repeating
-the benchmark fits:
-
-```bash
 python Realdata_Analysis_JP.py --reviewer-only --workers 4 --backend numba-fast --pg-reference reference_r2.json --results-root results/r2 --plots-dir plots/r2
 ```
 
-This reproduces the R2 Japan diagnostics and Figures 5 and 6. Each chain uses
-2,000,000 burn-in and 20,000,000 post-burn-in transitions, storing every 200th
-state (100,000 per chain). The diagnostic seed is 20261121 with seed family
-`reviewer-original-long-confirmation`, separate from the benchmark seed.
-The original model, four proposals, selection schedule, acceptance ratios and
-proposal settings (M=5, theta SD=0.2, split SD=0.5) are retained. All 700 daily
-CFR values, changepoint count and mean CFR are checked with rank-normalized
-split/folded Rhat and bulk/tail ESS. Expect roughly half an hour on the
-reference workstation; runtime depends on the machine.
+The second command runs the long R2 Japan chains and redraws Figures 5 and 6.
+It uses `reference_r2.json` for the Figure 6 sensitivity results. Omit
+`--pg-reference` to refit the sensitivity grid. For the main workflows,
+`auto` selects C when available and uses Numba otherwise.
 
-`--pg-reference` redraws the existing R1 sensitivity results from a compact
-numeric snapshot because R2 changes only Figure 6(a)'s grayscale encoding.
-The snapshot is not used in the new Japan sampling or convergence diagnostics.
-Omit this option to fit a new sensitivity grid. No ignored archive or manuscript
-file is needed by these commands.
+## Contact
 
-| R2 reference quantity | Maximum Rhat | Minimum bulk ESS |
-|---|---:|---:|
-| Simulations, all five diagnostic datasets | 1.00297 | 1285.4 |
-| Japan, changepoint count | 1.00003 | 82283.3 |
-| Japan, mean CFR | 1.00065 | 4810.9 |
-| Japan, all 700 daily CFR values | 1.00621 | 626.4 |
+Contact Hengtao Zhang at [bobzht341@gmail.com](mailto:bobzht341@gmail.com) or
+open a [GitHub issue](https://github.com/BobZhangHT/RJMCMC_CFR/issues) for code questions.
 
-The largest Japan daily Rhat occurs on day 513 (27 June 2021); the minimum
-daily tail ESS is 616.8. Diagnostic CSVs are under
-`results/r2/realdata/reviewer/` and
-`results/r2/reviewer_simulation_diagnostics/`. Plots are
-`plots/r2/simulation_traceplots.pdf`, `reviewer_rjmcmc_trace.pdf` and
-`p_g_sensitivity.pdf`. Plot display downsampling does not filter diagnostics.
-Checkpoint provenance prevents an earlier short run from being reused as R2.
-
-## Checkpoints and Outputs
-
-Each independent task writes an atomic checkpoint under `results/`. Repeating
-the same command resumes completed tasks by default. Use `--no-resume` to
-recompute them. Parallel stages use process workers and display progress bars.
-
-Use `--results-root` and `--plots-dir` to place generated artifacts elsewhere:
-
-```bash
-python Simulation_Analysis.py --stage diagnostics \
-  --results-root results/diagnostics --plots-dir plots/diagnostics
-```
-
-Neither checkpoints nor generated plots are tracked by Git.
-
-## Verification
-
-Run the portable test suite:
-
-```bash
-python -m pytest -q
-```
-
-After building the C extension, run the same command again to include the
-cross-backend statistical consistency tests.
-
-For quick workflow checks:
-
-```bash
-python Simulation_Analysis.py --smoke --workers 1 --backend numba
-python Realdata_Analysis_JP.py --smoke --workers 1 --backend numba
-```
-
-## License
-
-This project is released under the [MIT License](LICENSE).
-
-## Citation
-
-Please cite the accompanying manuscript when using this code. Publication
-metadata will be added here when the article record is available.
+[MIT License](LICENSE)
